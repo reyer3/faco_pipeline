@@ -3,7 +3,7 @@
 
 pipeline:
   name: "faco_cobranzas_pipeline"
-  version: "1.1.0"
+  version: "1.2.0"
   environment: "production"
 
 # Configuración de BigQuery
@@ -36,57 +36,113 @@ stage_asignacion:
     enabled: true
     filter_by_date: "FECHA_ASIGNACION"
     fallback_message: "No se encontraron archivos para la fecha especificada"
+
+# Configuración del Stage de Deudas
+stage_deudas:
+  table_name: "bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas"
+  stored_procedure: "bi_P3fV4dWNeMkN5RJMhV8e_sp_deudas"
+  source_table: "batch_P3fV4dWNeMkN5RJMhV8e_tran_deuda"
+  
+  # Llaves primarias
+  primary_keys:
+    - "cod_cuenta"
+    - "nro_documento"
+    - "archivo"
+    - "fecha_deuda"
     
-  # Modos de ejecución
-  execution_modes:
-    default: "INCREMENTAL"
-    options:
-      - "INCREMENTAL"  # Solo procesa registros >= fecha_proceso
-      - "FULL"         # Reprocesa todo el histórico
-      
-  # Filtros de archivos
-  file_filters:
-    auto_detect: true    # Si archivo_filter es NULL, detecta automáticamente
-    manual_override: true # Permite especificar filtros manuales
+  # Configuración de detección automática
+  auto_detection:
+    enabled: true
+    file_pattern: "TRAN_DEUDA_DDMM"
+    date_format: "%d%m"
+    fallback_message: "No se encontraron archivos TRAN_DEUDA para la fecha"
     
-  # Reglas de negocio
-  business_rules:
-    objetivos_recupero:
-      AL_VCTO: 0.15
-      ENTRE_4_Y_15D: 0.25
-      TEMPRANA: 0.20
-      DEFAULT: 0.20
-      
-    categorias_vencimiento:
-      dias_por_vencer: [30, 60, 90]
-      
-    tipos_cartera:
-      TEMPRANA: "TEMPRANA"
-      CF_ANN: "CUOTA_FRACCIONAMIENTO" 
-      AN: "ALTAS_NUEVAS"
-      DEFAULT: "OTRAS"
-      
-    fraccionamiento:
-      values: ["FRACCIONADO", "NORMAL"]
-      default: "NORMAL"
-      
+  # Lógica de día de apertura
+  apertura_logic:
+    check_calendar: true
+    calendar_field: "FECHA_ASIGNACION"
+    
+  # Reglas de gestionabilidad
+  gestionabilidad:
+    requires_asignacion: true
+    medible_only_apertura: true
+    
+  # Tipos de activación
+  tipos_activacion:
+    - "APERTURA"
+    - "SUBSIGUIENTE" 
+    - "REACTIVACION"
+    
+  # Estados de deuda
+  estados_deuda:
+    - "ACTIVA"
+    - "INACTIVA"
+    - "CERRADA"
+    
+# Modos de ejecución globales
+execution_modes:
+  default: "INCREMENTAL"
+  options:
+    - "INCREMENTAL"  # Solo procesa registros >= fecha_proceso
+    - "FULL"         # Reprocesa todo el histórico
+    
+# Configuración global de filtros de archivos
+file_filters:
+  auto_detect: true    # Si archivo_filter es NULL, detecta automáticamente
+  manual_override: true # Permite especificar filtros manuales
+    
+# Reglas de negocio globales
+business_rules:
+  objetivos_recupero:
+    AL_VCTO: 0.15
+    ENTRE_4_Y_15D: 0.25
+    TEMPRANA: 0.20
+    DEFAULT: 0.20
+    
+  categorias_vencimiento:
+    dias_por_vencer: [30, 60, 90]
+    
+  tipos_cartera:
+    TEMPRANA: "TEMPRANA"
+    CF_ANN: "CUOTA_FRACCIONAMIENTO" 
+    AN: "ALTAS_NUEVAS"
+    DEFAULT: "OTRAS"
+    
+  fraccionamiento:
+    values: ["FRACCIONADO", "NORMAL"]
+    default: "NORMAL"
+    
 # Configuración de logging
 logging:
   level: "INFO"
   format: "json"
   capture_metrics: true
-  log_detected_files: true  # Nuevo: registra archivos detectados automáticamente
+  log_detected_files: true
+  log_business_logic: true  # Nuevo: para lógica específica de deudas
   
 # Configuración de calidad de datos
 data_quality:
   tests_enabled: true
   success_rate_threshold: 95.0
-  tests:
+  
+  # Tests de asignación
+  asignacion_tests:
     - "unique_primary_keys"
     - "not_null_validation"
     - "objetivo_recupero_range"
     - "categoria_vencimiento_values"
     - "calendar_join_completeness"
+    
+  # Tests de deudas
+  deudas_tests:
+    - "unique_primary_keys_deudas"
+    - "fecha_construccion"
+    - "consistencia_dia_apertura"
+    - "calculo_montos"
+    - "logica_medible"
+    - "tipos_activacion"
+    - "rangos_montos"
+    - "consistencia_asignacion"
     
 # Configuración de monitoreo
 monitoring:
@@ -94,14 +150,32 @@ monitoring:
     duration_threshold_minutes: 30
     volume_variation_threshold: 50.0
     quality_threshold: 95.0
-    no_files_detected: true  # Nuevo: alerta si no se detectan archivos
+    no_files_detected: true
+    # Alertas específicas de deudas
+    no_medibles_apertura: true  # Sin deudas medibles en día apertura
+    medibles_subsiguiente: true # Deudas medibles en día subsiguiente (error)
+    ratio_anormal: 30.0         # Variación > 30% en métricas vs histórico
     
 # Configuración de optimización
 optimization:
   partitioning:
     enabled: true
-    field: "fecha_asignacion"
+    asignacion_field: "fecha_asignacion"
+    deudas_field: "fecha_deuda"
     type: "DATE"
   clustering:
     enabled: true
-    fields: ["cod_luna", "tipo_cartera", "segmento_gestion"]
+    asignacion_fields: ["cod_luna", "tipo_cartera", "segmento_gestion"]
+    deudas_fields: ["cod_cuenta", "tipo_activacion", "es_medible"]
+    
+# Secuencia de ejecución recomendada
+execution_sequence:
+  - stage: "asignacion"
+    depends_on: []
+    description: "Debe ejecutarse primero para establecer base de clientes asignados"
+  - stage: "deudas" 
+    depends_on: ["asignacion"]
+    description: "Requiere datos de asignación para determinar gestionabilidad"
+  - stage: "gestiones"
+    depends_on: ["asignacion", "deudas"]
+    description: "Procesa gestiones sobre base de asignados y deudas"
