@@ -3,7 +3,7 @@
 
 pipeline:
   name: "faco_cobranzas_pipeline"
-  version: "1.2.0"
+  version: "1.3.0"
   environment: "production"
 
 # Configuración de BigQuery
@@ -65,7 +65,7 @@ stage_deudas:
   # Reglas de gestionabilidad
   gestionabilidad:
     requires_asignacion: true
-    medible_only_apertura: true
+    medible_only_trandeuda: true  # Solo medible si coincide FECHA_TRANDEUDA
     
   # Tipos de activación
   tipos_activacion:
@@ -78,6 +78,43 @@ stage_deudas:
     - "ACTIVA"
     - "INACTIVA"
     - "CERRADA"
+
+# Configuración del Stage de Gestiones
+stage_gestiones:
+  table_name: "bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones"
+  stored_procedure: "bi_P3fV4dWNeMkN5RJMhV8e_sp_gestiones"
+  
+  # Fuentes de datos
+  sources:
+    bot_table: "voicebot_P3fV4dWNeMkN5RJMhV8e"
+    humano_table: "mibotair_P3fV4dWNeMkN5RJMhV8e"
+    
+  # Tablas de homologación
+  homologacion:
+    bot_responses: "homologacion_P3fV4dWNeMkN5RJMhV8e_voicebot"
+    humano_responses: "homologacion_P3fV4dWNeMkN5RJMhV8e_v2"
+    usuarios: "homologacion_P3fV4dWNeMkN5RJMhV8e_usuarios"
+    
+  # Llaves primarias
+  primary_keys:
+    - "cod_luna"
+    - "fecha_gestion"
+    - "canal_origen"
+    - "secuencia_gestion"
+    
+  # Canales soportados
+  canales:
+    - "BOT"
+    - "HUMANO"
+    
+  # Configuración de medibilidad
+  medibilidad:
+    requires_asignacion_or_deuda: true
+    depends_on: ["stage_asignacion", "stage_deudas"]
+    
+  # Filtros temporales
+  temporal_filters:
+    min_date: "2025-01-01"  # Filtrar fechas erróneas
     
 # Modos de ejecución globales
 execution_modes:
@@ -112,13 +149,19 @@ business_rules:
     values: ["FRACCIONADO", "NORMAL"]
     default: "NORMAL"
     
+  # Reglas de efectividad
+  efectividad:
+    contacto_efectivo_patterns: ["%CONTACTO_EFECTIVO%", "%EFECTIVO%"]
+    compromiso_flags: ["SI", "TRUE", "1"]
+    
 # Configuración de logging
 logging:
   level: "INFO"
   format: "json"
   capture_metrics: true
   log_detected_files: true
-  log_business_logic: true  # Nuevo: para lógica específica de deudas
+  log_business_logic: true
+  log_homologacion: true  # Nuevo: métricas de homologación
   
 # Configuración de calidad de datos
 data_quality:
@@ -143,6 +186,20 @@ data_quality:
     - "tipos_activacion"
     - "rangos_montos"
     - "consistencia_asignacion"
+    - "medibilidad_trandeuda"
+    
+  # Tests de gestiones
+  gestiones_tests:
+    - "unique_primary_keys_gestiones"
+    - "canales_validos"
+    - "secuencia_gestiones"
+    - "homologacion_bot"
+    - "homologacion_humano"
+    - "montos_compromiso"
+    - "primera_gestion_dia"
+    - "operadores_bot"
+    - "medibilidad_gestiones"
+    - "dias_semana"
     
 # Configuración de monitoreo
 monitoring:
@@ -152,9 +209,13 @@ monitoring:
     quality_threshold: 95.0
     no_files_detected: true
     # Alertas específicas de deudas
-    no_medibles_apertura: true  # Sin deudas medibles en día apertura
-    medibles_subsiguiente: true # Deudas medibles en día subsiguiente (error)
-    ratio_anormal: 30.0         # Variación > 30% en métricas vs histórico
+    no_medibles_apertura: true
+    medibles_subsiguiente: true
+    ratio_anormal: 30.0
+    # Alertas específicas de gestiones
+    baja_homologacion: 80.0      # % mínimo homologación
+    sin_gestiones: true          # Cero gestiones detectadas
+    efectividad_anormal: 30.0    # Variación efectividad vs histórico
     
 # Configuración de optimización
 optimization:
@@ -162,11 +223,13 @@ optimization:
     enabled: true
     asignacion_field: "fecha_asignacion"
     deudas_field: "fecha_deuda"
+    gestiones_field: "fecha_gestion"
     type: "DATE"
   clustering:
     enabled: true
     asignacion_fields: ["cod_luna", "tipo_cartera", "segmento_gestion"]
     deudas_fields: ["cod_cuenta", "tipo_activacion", "es_medible"]
+    gestiones_fields: ["cod_luna", "canal_origen", "es_contacto_efectivo"]
     
 # Secuencia de ejecución recomendada
 execution_sequence:
@@ -178,4 +241,34 @@ execution_sequence:
     description: "Requiere datos de asignación para determinar gestionabilidad"
   - stage: "gestiones"
     depends_on: ["asignacion", "deudas"]
-    description: "Procesa gestiones sobre base de asignados y deudas"
+    description: "Requiere asignación y deudas para determinar medibilidad de gestiones"
+  - stage: "pagos"
+    depends_on: ["asignacion", "deudas", "gestiones"]
+    description: "Procesa pagos vinculados a gestiones y deudas"
+    
+# Configuración de reportería
+reporting:
+  efectividad:
+    metricas_principales:
+      - "total_gestiones"
+      - "contactos_efectivos"
+      - "compromisos"
+      - "monto_compromisos"
+      - "pct_efectividad"
+      - "pct_conversion"
+    dimensiones:
+      - "canal_origen"
+      - "operador_final"
+      - "grupo_respuesta"
+      - "dia_semana"
+  
+  gestionabilidad:
+    metricas_principales:
+      - "clientes_asignados"
+      - "clientes_con_deuda"
+      - "gestiones_medibles"
+      - "monto_medible"
+    dimensiones:
+      - "tipo_cartera"
+      - "categoria_vencimiento"
+      - "es_medible"
