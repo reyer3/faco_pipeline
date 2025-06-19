@@ -3,8 +3,9 @@
 -- ================================================================
 -- Autor: FACO Team
 -- Fecha: 2025-06-19
+-- Versión: 1.1.0
 -- Descripción: Conjunto de tests para validar la calidad de datos
---              en el stage de deudas, incluyendo lógica de negocio
+--              en el stage de deudas, incluyendo lógica de FECHA_TRANDEUDA
 -- ================================================================
 
 -- ================================================================
@@ -45,23 +46,20 @@ SELECT
 FROM test_fecha_construccion;
 
 -- ================================================================
--- TEST 3: Consistencia de lógica día de apertura
+-- TEST 3: Validación específica lógica FECHA_TRANDEUDA
 -- ================================================================
-WITH test_dia_apertura AS (
-  -- Verificar que todos los registros del mismo día tengan el mismo valor de es_dia_apertura
-  SELECT 
-    fecha_proceso,
-    COUNT(DISTINCT es_dia_apertura) as valores_distintos
+WITH test_medibilidad_trandeuda AS (
+  SELECT COUNT(*) as registros_inconsistentes
   FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas`
-  WHERE fecha_proceso = CURRENT_DATE()
-  GROUP BY fecha_proceso
-  HAVING COUNT(DISTINCT es_dia_apertura) > 1
+  WHERE es_medible = TRUE 
+    AND (fecha_trandeuda IS NULL OR fecha_deuda != fecha_trandeuda)
+    AND fecha_proceso = CURRENT_DATE()
 )
 SELECT 
-  'TEST_CONSISTENCIA_DIA_APERTURA' as test_name,
-  COUNT(*) as violaciones,
-  CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END as resultado
-FROM test_dia_apertura;
+  'TEST_MEDIBILIDAD_TRANDEUDA' as test_name,
+  registros_inconsistentes as violaciones,
+  CASE WHEN registros_inconsistentes = 0 THEN 'PASS' ELSE 'FAIL' END as resultado
+FROM test_medibilidad_trandeuda;
 
 -- ================================================================
 -- TEST 4: Validación de cálculos de montos medibles
@@ -91,22 +89,25 @@ SELECT
 FROM test_montos_medibles;
 
 -- ================================================================
--- TEST 5: Validación de lógica es_medible
+-- TEST 5: Validación de lógica es_medible CORREGIDA
 -- ================================================================
 WITH test_logica_medible AS (
   SELECT COUNT(*) as registros_inconsistentes
   FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas`
   WHERE fecha_proceso = CURRENT_DATE()
     AND (
-      -- Si es medible, debe ser gestionable Y día de apertura
-      (es_medible = TRUE AND (es_gestionable = FALSE OR es_dia_apertura = FALSE))
+      -- Si es medible, debe ser gestionable Y tener coincidencia FECHA_TRANDEUDA
+      (es_medible = TRUE AND (es_gestionable = FALSE OR fecha_deuda != fecha_trandeuda))
       OR
-      -- Si no es día de apertura, no debe ser medible (independiente de si es gestionable)
-      (es_dia_apertura = FALSE AND es_medible = TRUE)
+      -- Si no es gestionable, no debe ser medible
+      (es_gestionable = FALSE AND es_medible = TRUE)
+      OR
+      -- Si no coincide FECHA_TRANDEUDA, no debe ser medible
+      (fecha_trandeuda IS NULL AND es_medible = TRUE)
     )
 )
 SELECT 
-  'TEST_LOGICA_MEDIBLE' as test_name,
+  'TEST_LOGICA_MEDIBLE_TRANDEUDA' as test_name,
   registros_inconsistentes as violaciones,
   CASE WHEN registros_inconsistentes = 0 THEN 'PASS' ELSE 'FAIL' END as resultado
 FROM test_logica_medible;
@@ -163,51 +164,91 @@ SELECT
 FROM test_consistencia_asignacion;
 
 -- ================================================================
--- RESUMEN DE MÉTRICAS DE NEGOCIO
+-- TEST 9: Cobertura de FECHA_TRANDEUDA en calendario
+-- ================================================================
+WITH test_cobertura_trandeuda AS (
+  SELECT 
+    COUNT(*) as total_deudas,
+    COUNT(CASE WHEN fecha_trandeuda IS NOT NULL THEN 1 END) as con_calendario,
+    ROUND(COUNT(CASE WHEN fecha_trandeuda IS NOT NULL THEN 1 END) / COUNT(*) * 100, 2) as pct_cobertura
+  FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas`
+  WHERE fecha_proceso = CURRENT_DATE()
+)
+SELECT 
+  'TEST_COBERTURA_TRANDEUDA' as test_name,
+  CASE WHEN pct_cobertura < 50 THEN 1 ELSE 0 END as violaciones,
+  CASE WHEN pct_cobertura >= 50 THEN 'PASS' ELSE 'WARN' END as resultado,
+  CONCAT('Cobertura: ', CAST(pct_cobertura AS STRING), '%') as detalle
+FROM test_cobertura_trandeuda;
+
+-- ================================================================
+-- RESUMEN DE MÉTRICAS DE NEGOCIO CON FECHA_TRANDEUDA
 -- ================================================================
 SELECT 
-  'METRICAS_NEGOCIO_DEUDAS' as tipo,
+  'METRICAS_NEGOCIO_TRANDEUDA' as tipo,
   fecha_proceso,
-  es_dia_apertura,
   COUNT(*) as total_deudas,
   ROUND(SUM(monto_exigible), 2) as monto_total,
   COUNT(CASE WHEN es_gestionable THEN 1 END) as deudas_gestionables,
   ROUND(SUM(monto_gestionable), 2) as monto_gestionable,
-  COUNT(CASE WHEN es_medible THEN 1 END) as deudas_medibles,
-  ROUND(SUM(monto_medible), 2) as monto_medible,
-  COUNT(DISTINCT cod_cuenta) as clientes_unicos,
-  COUNT(DISTINCT archivo) as archivos_procesados,
-  COUNT(DISTINCT tipo_activacion) as tipos_activacion_distintos
+  COUNT(CASE WHEN es_medible THEN 1 END) as deudas_medibles_por_trandeuda,
+  ROUND(SUM(monto_medible), 2) as monto_medible_por_trandeuda,
+  COUNT(CASE WHEN fecha_trandeuda IS NOT NULL THEN 1 END) as deudas_con_calendario,
+  COUNT(DISTINCT fecha_deuda) as fechas_distintas_archivos,
+  COUNT(DISTINCT fecha_trandeuda) as fechas_distintas_calendario,
+  ROUND(COUNT(CASE WHEN fecha_trandeuda IS NOT NULL THEN 1 END) / COUNT(*) * 100, 2) as pct_cobertura_calendario
 FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas`
 WHERE fecha_proceso = CURRENT_DATE()
-GROUP BY fecha_proceso, es_dia_apertura;
+GROUP BY fecha_proceso;
 
 -- ================================================================
--- TEST COMPARATIVO: Deudas por tipo de día
+-- ANÁLISIS DE COINCIDENCIAS POR FECHA
 -- ================================================================
-WITH comparativo_tipos_dia AS (
+SELECT 
+  'ANALISIS_COINCIDENCIAS_FECHA' as tipo,
+  fecha_deuda_construida,
+  fecha_trandeuda,
+  COUNT(*) as cantidad_deudas,
+  ROUND(SUM(monto_exigible), 2) as monto_total,
+  COUNT(CASE WHEN es_gestionable THEN 1 END) as gestionables,
+  COUNT(CASE WHEN es_medible THEN 1 END) as medibles,
+  CASE 
+    WHEN fecha_trandeuda IS NULL THEN 'SIN_CALENDARIO'
+    WHEN fecha_deuda_construida = fecha_trandeuda THEN 'COINCIDE'
+    ELSE 'NO_COINCIDE'
+  END as estado_coincidencia
+FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas`
+WHERE fecha_proceso = CURRENT_DATE()
+GROUP BY fecha_deuda_construida, fecha_trandeuda
+ORDER BY fecha_deuda_construida, fecha_trandeuda;
+
+-- ================================================================
+-- COMPARATIVO: Antes vs Después de corrección FECHA_TRANDEUDA
+-- ================================================================
+WITH comparativo_logicas AS (
   SELECT 
-    tipo_activacion,
-    es_dia_apertura,
-    COUNT(*) as cantidad_deudas,
-    ROUND(SUM(monto_exigible), 2) as monto_total,
-    ROUND(AVG(monto_exigible), 2) as monto_promedio,
-    COUNT(CASE WHEN es_gestionable THEN 1 END) as gestionables,
-    COUNT(CASE WHEN es_medible THEN 1 END) as medibles
+    -- Lógica anterior (incorrecta) - solo para comparación
+    COUNT(CASE WHEN es_gestionable AND es_dia_apertura THEN 1 END) as medibles_logica_anterior,
+    ROUND(SUM(CASE WHEN es_gestionable AND es_dia_apertura THEN monto_exigible ELSE 0 END), 2) as monto_logica_anterior,
+    
+    -- Lógica actual (correcta) - por FECHA_TRANDEUDA
+    COUNT(CASE WHEN es_medible THEN 1 END) as medibles_logica_actual,
+    ROUND(SUM(monto_medible), 2) as monto_logica_actual
+    
   FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas`
   WHERE fecha_proceso = CURRENT_DATE()
-  GROUP BY tipo_activacion, es_dia_apertura
 )
 SELECT 
-  'COMPARATIVO_TIPOS_DIA' as test_name,
-  *,
+  'COMPARATIVO_LOGICAS_MEDIBILIDAD' as test_name,
+  medibles_logica_anterior,
+  medibles_logica_actual,
+  medibles_logica_anterior - medibles_logica_actual as diferencia_cantidad,
+  monto_logica_anterior - monto_logica_actual as diferencia_monto,
   CASE 
-    WHEN tipo_activacion = 'APERTURA' AND medibles = 0 THEN 'WARN: Sin deudas medibles en apertura'
-    WHEN tipo_activacion = 'SUBSIGUIENTE' AND medibles > 0 THEN 'WARN: Deudas medibles en subsiguiente'
-    ELSE 'OK'
+    WHEN medibles_logica_actual <= medibles_logica_anterior THEN 'OK'
+    ELSE 'WARN: Más medibles con nueva lógica'
   END as validacion
-FROM comparativo_tipos_dia
-ORDER BY tipo_activacion, es_dia_apertura;
+FROM comparativo_logicas;
 
 -- ================================================================
 -- RESUMEN CONSOLIDADO DE TODOS LOS TESTS
@@ -218,10 +259,11 @@ WITH todos_los_tests AS (
   SELECT 'TEST_PLACEHOLDER' as test_name, 0 as violaciones, 'PASS' as resultado
 )
 SELECT 
-  'RESUMEN_TESTS_DEUDAS' as resumen,
+  'RESUMEN_TESTS_DEUDAS_TRANDEUDA' as resumen,
   COUNT(*) as total_tests,
   SUM(CASE WHEN resultado = 'PASS' THEN 1 ELSE 0 END) as tests_passed,
   SUM(CASE WHEN resultado = 'FAIL' THEN 1 ELSE 0 END) as tests_failed,
+  SUM(CASE WHEN resultado = 'WARN' THEN 1 ELSE 0 END) as tests_warnings,
   ROUND(SUM(CASE WHEN resultado = 'PASS' THEN 1 ELSE 0 END) / COUNT(*) * 100, 2) as success_rate
 FROM todos_los_tests
 WHERE test_name != 'TEST_PLACEHOLDER';
