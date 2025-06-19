@@ -1,0 +1,45 @@
+# Archivos de configuración local
+*.local
+.env
+.env.local
+
+# Archivos temporales
+*.tmp
+*.temp
+*.log
+
+# Archivos de backup
+*.bak
+*.backup
+
+# Directorios de IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Credenciales y secretos
+credentials/
+secrets/
+*.key
+*.pem
+service-account*.json
+
+# Archivos de datos locales
+data/
+exports/
+*.csv
+*.xlsx
+*.json
+
+# Documentación generada
+docs/build/
+*.pdf
+
+# Archivos de testing local
+test_data/
+local_tests/
