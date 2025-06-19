@@ -3,9 +3,9 @@
 -- ================================================================
 -- Autor: FACO Team
 -- Fecha: 2025-06-19
--- Versión: 1.0.0
--- Descripción: Procesamiento de deudas diarias con lógica de día de
---              apertura vs días subsiguientes y detección automática
+-- Versión: 1.1.0
+-- Descripción: Procesamiento de deudas diarias con lógica de medibilidad
+--              basada en coincidencia FECHA_TRANDEUDA del calendario
 -- ================================================================
 
 CREATE OR REPLACE PROCEDURE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_deudas`(
@@ -23,18 +23,21 @@ BEGIN
   DECLARE v_archivos_detectados STRING DEFAULT '';
   DECLARE v_es_dia_apertura BOOLEAN DEFAULT FALSE;
   DECLARE v_carteras_abriendo STRING DEFAULT '';
+  DECLARE v_fechas_trandeuda STRING DEFAULT '';
   
   -- ================================================================
-  -- DETECCIÓN DE DÍA DE APERTURA
+  -- DETECCIÓN DE DÍA DE APERTURA Y FECHAS TRANDEUDA
   -- ================================================================
   
   -- Verificar si la fecha de proceso corresponde a apertura de alguna cartera
   SELECT 
     COUNT(*) > 0,
-    STRING_AGG(ARCHIVO, ', ')
+    STRING_AGG(DISTINCT ARCHIVO, ', '),
+    STRING_AGG(DISTINCT CAST(FECHA_TRANDEUDA AS STRING), ', ')
   INTO 
     v_es_dia_apertura,
-    v_carteras_abriendo
+    v_carteras_abriendo,
+    v_fechas_trandeuda
   FROM `mibot-222814.BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_dash_calendario_v5`
   WHERE FECHA_ASIGNACION = p_fecha_proceso;
   
@@ -81,16 +84,18 @@ BEGIN
       'modo_ejecucion', p_modo_ejecucion,
       'es_dia_apertura', v_es_dia_apertura,
       'carteras_abriendo', v_carteras_abriendo,
+      'fechas_trandeuda', v_fechas_trandeuda,
       'archivos_detectados', v_archivos_detectados
     ),
     'INICIADO',
     CONCAT('Día apertura: ', CAST(v_es_dia_apertura AS STRING), 
            '. Carteras: ', v_carteras_abriendo,
+           '. Fechas TRANDEUDA: ', v_fechas_trandeuda,
            '. Archivos: ', v_archivos_detectados)
   );
   
   -- ================================================================
-  -- MERGE/UPSERT: Datos de deudas con lógica de negocio
+  -- MERGE/UPSERT: Datos de deudas con lógica de negocio corregida
   -- ================================================================
   
   MERGE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` AS target
@@ -144,17 +149,20 @@ BEGIN
         deu.fecha_deuda_construida,
         cal.FECHA_ASIGNACION AS fecha_asignacion,
         cal.FECHA_CIERRE AS fecha_cierre,
+        cal.FECHA_TRANDEUDA AS fecha_trandeuda,
         cal.DIAS_GESTION AS dias_gestion,
         
-        -- 🎯 LÓGICA DE NEGOCIO ESPECÍFICA
+        -- 🎯 LÓGICA DE NEGOCIO ESPECÍFICA CORREGIDA
         v_es_dia_apertura AS es_dia_apertura,
         
         -- Determinar si es gestionable (tiene asignación)
         CASE WHEN asig.cod_cuenta IS NOT NULL THEN TRUE ELSE FALSE END AS es_gestionable,
         
-        -- Determinar si es medible (gestionable Y día de apertura)
+        -- 🔥 NUEVA LÓGICA: Es medible solo si coincide fecha_deuda_construida con FECHA_TRANDEUDA
         CASE 
-          WHEN asig.cod_cuenta IS NOT NULL AND v_es_dia_apertura THEN TRUE 
+          WHEN asig.cod_cuenta IS NOT NULL 
+               AND deu.fecha_deuda_construida = cal.FECHA_TRANDEUDA 
+          THEN TRUE 
           ELSE FALSE 
         END AS es_medible,
         
@@ -170,14 +178,17 @@ BEGIN
         asig.segmento_gestion,
         asig.tipo_cartera,
         
-        -- 📊 MÉTRICAS CALCULADAS
+        -- 📊 MÉTRICAS CALCULADAS CORREGIDAS
         CASE 
           WHEN asig.cod_cuenta IS NOT NULL THEN deu.monto_exigible 
           ELSE 0 
         END AS monto_gestionable,
         
+        -- 🔥 MONTO MEDIBLE: Solo si gestionable Y coincide con FECHA_TRANDEUDA
         CASE 
-          WHEN asig.cod_cuenta IS NOT NULL AND v_es_dia_apertura THEN deu.monto_exigible 
+          WHEN asig.cod_cuenta IS NOT NULL 
+               AND deu.fecha_deuda_construida = cal.FECHA_TRANDEUDA 
+          THEN deu.monto_exigible 
           ELSE 0 
         END AS monto_medible,
         
@@ -195,14 +206,14 @@ BEGIN
         
       FROM deuda_con_fecha AS deu
       
-      -- Join con calendario para obtener información de cartera
+      -- 🔥 JOIN CORREGIDO: Con calendario basado en FECHA_TRANDEUDA
       LEFT JOIN `mibot-222814.BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_dash_calendario_v5` AS cal
-        ON deu.fecha_deuda_construida = cal.FECHA_ASIGNACION
+        ON deu.fecha_deuda_construida = cal.FECHA_TRANDEUDA
       
       -- Join con asignación para determinar gestionabilidad
       LEFT JOIN `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_asignacion` AS asig
         ON deu.cod_cuenta = asig.cod_cuenta
-        AND deu.fecha_deuda_construida = asig.fecha_asignacion
+        AND cal.FECHA_ASIGNACION = asig.fecha_asignacion
       
       WHERE deu.fecha_deuda_construida IS NOT NULL
     )
@@ -228,7 +239,7 @@ BEGIN
   -- ➕ INSERTAR NUEVOS REGISTROS
   WHEN NOT MATCHED THEN INSERT (
     cod_cuenta, nro_documento, archivo, fecha_deuda, monto_exigible, estado_deuda,
-    fecha_deuda_construida, fecha_asignacion, fecha_cierre, dias_gestion,
+    fecha_deuda_construida, fecha_asignacion, fecha_cierre, fecha_trandeuda, dias_gestion,
     es_dia_apertura, es_gestionable, es_medible, tipo_activacion,
     cod_luna, tiene_asignacion, segmento_gestion, tipo_cartera,
     monto_gestionable, monto_medible, secuencia_activacion,
@@ -237,7 +248,7 @@ BEGIN
   VALUES (
     source.cod_cuenta, source.nro_documento, source.archivo, source.fecha_deuda,
     source.monto_exigible, source.estado_deuda, source.fecha_deuda_construida,
-    source.fecha_asignacion, source.fecha_cierre, source.dias_gestion,
+    source.fecha_asignacion, source.fecha_cierre, source.fecha_trandeuda, source.dias_gestion,
     source.es_dia_apertura, source.es_gestionable, source.es_medible, source.tipo_activacion,
     source.cod_luna, source.tiene_asignacion, source.segmento_gestion, source.tipo_cartera,
     source.monto_gestionable, source.monto_medible, source.secuencia_activacion,
@@ -278,27 +289,29 @@ BEGIN
     v_registros_nuevos,
     v_registros_actualizados,
     'COMPLETADO',
-    CONCAT('Proceso completado. Día apertura: ', CAST(v_es_dia_apertura AS STRING),
+    CONCAT('Proceso completado. Fechas TRANDEUDA: ', v_fechas_trandeuda,
            '. Archivos: ', v_archivos_detectados)
   );
   
   -- ================================================================
-  -- RESUMEN DE NEGOCIO (opcional, comentar en producción)
+  -- RESUMEN DE NEGOCIO CORREGIDO
   -- ================================================================
   
   -- Mostrar métricas de negocio del proceso
   SELECT 
-    'RESUMEN_DEUDAS' as tipo,
+    'RESUMEN_DEUDAS_MEDIBILIDAD' as tipo,
     p_fecha_proceso as fecha_proceso,
     v_es_dia_apertura as es_dia_apertura,
-    v_carteras_abriendo as carteras_abriendo,
+    v_fechas_trandeuda as fechas_trandeuda_calendario,
     COUNT(*) as total_deudas,
     SUM(monto_exigible) as monto_total,
     SUM(CASE WHEN es_gestionable THEN 1 ELSE 0 END) as deudas_gestionables,
     SUM(monto_gestionable) as monto_gestionable_total,
-    SUM(CASE WHEN es_medible THEN 1 ELSE 0 END) as deudas_medibles,
-    SUM(monto_medible) as monto_medible_total,
-    COUNT(DISTINCT cod_cuenta) as clientes_unicos
+    -- 🔥 MÉTRICAS CORREGIDAS: Medibles por coincidencia con FECHA_TRANDEUDA
+    SUM(CASE WHEN es_medible THEN 1 ELSE 0 END) as deudas_medibles_por_trandeuda,
+    SUM(monto_medible) as monto_medible_por_trandeuda,
+    COUNT(DISTINCT cod_cuenta) as clientes_unicos,
+    COUNT(DISTINCT CASE WHEN fecha_trandeuda IS NOT NULL THEN fecha_deuda END) as fechas_con_calendario
   FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas`
   WHERE fecha_proceso = p_fecha_proceso;
   
