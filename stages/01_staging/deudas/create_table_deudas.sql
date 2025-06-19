@@ -3,9 +3,9 @@
 -- ================================================================
 -- Autor: FACO Team
 -- Fecha: 2025-06-19
--- Versión: 1.0.0
+-- Versión: 1.1.0
 -- Descripción: Tabla staging para datos de deudas diarias con lógica
---              de día de apertura vs días subsiguientes
+--              de medibilidad basada en coincidencia con FECHA_TRANDEUDA
 -- ================================================================
 
 CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` (
@@ -33,6 +33,8 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` (
     OPTIONS(description="Fecha de asignación de cartera (desde calendario)"),
   fecha_cierre DATE
     OPTIONS(description="Fecha de cierre de gestión"),
+  fecha_trandeuda DATE
+    OPTIONS(description="FECHA_TRANDEUDA desde calendario - clave para medibilidad"),
   dias_gestion INT64
     OPTIONS(description="Días disponibles para gestión"),
   
@@ -40,9 +42,9 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` (
   es_dia_apertura BOOLEAN NOT NULL
     OPTIONS(description="TRUE si es día de apertura de cartera"),
   es_gestionable BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si el cliente es gestionable"),
+    OPTIONS(description="TRUE si el cliente es gestionable (tiene asignación)"),
   es_medible BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si cuenta para métricas de competencia"),
+    OPTIONS(description="TRUE si fecha_deuda coincide con FECHA_TRANDEUDA del calendario"),
   tipo_activacion STRING NOT NULL
     OPTIONS(description="APERTURA, SUBSIGUIENTE, REACTIVACION"),
   
@@ -79,11 +81,11 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` (
 
 -- 🔍 CONFIGURACIÓN DE PARTICIONADO Y CLUSTERING
 PARTITION BY DATE(fecha_deuda)
-CLUSTER BY cod_cuenta, tipo_activacion, es_medible
+CLUSTER BY cod_cuenta, es_medible, fecha_trandeuda
 
 -- 📋 OPCIONES DE TABLA
 OPTIONS(
-  description="Tabla staging para datos de deudas diarias. Maneja lógica de día de apertura vs días subsiguientes, incluyendo filtros de gestionabilidad y medibilidad para competencia.",
+  description="Tabla staging para datos de deudas diarias. La medibilidad se determina por coincidencia entre fecha extraída del archivo TRAN_DEUDA y FECHA_TRANDEUDA del calendario.",
   labels=[("ambiente", "produccion"), ("pipeline", "faco_cobranzas"), ("capa", "staging")]
 );
 
@@ -94,31 +96,34 @@ OPTIONS(
 -- BigQuery no soporta constraints explícitos, pero documentamos las reglas:
 -- PRIMARY KEY: (cod_cuenta, nro_documento, archivo, fecha_deuda)
 -- FOREIGN KEY: cod_cuenta -> asignacion.cod_cuenta (opcional)
+-- BUSINESS RULE: es_medible = TRUE solo si fecha_deuda = fecha_trandeuda
 -- CHECK: monto_exigible >= 0
 -- CHECK: tipo_activacion IN ('APERTURA', 'SUBSIGUIENTE', 'REACTIVACION')
 -- CHECK: estado_deuda IN ('ACTIVA', 'INACTIVA', 'CERRADA')
 
 -- ================================================================
--- COMENTARIOS DE NEGOCIO
+-- COMENTARIOS DE NEGOCIO CORREGIDOS
 -- ================================================================
 
--- Esta tabla maneja la lógica compleja de deudas diarias:
+-- Esta tabla maneja la lógica específica de medibilidad de deudas:
 --
--- DÍA DE APERTURA:
--- - Se filtran solo clientes que pasan a "gestionables y medibles"
--- - es_dia_apertura = TRUE
--- - es_gestionable = TRUE solo para clientes asignados
--- - es_medible = TRUE solo para clientes gestionables
--- - tipo_activacion = 'APERTURA'
+-- REGLA PRINCIPAL DE MEDIBILIDAD:
+-- Un cliente es MEDIBLE solo cuando:
+-- 1. Tiene asignación (es_gestionable = TRUE)
+-- 2. La fecha extraída del archivo TRAN_DEUDA coincide con FECHA_TRANDEUDA del calendario
+-- 3. Esta coincidencia determina que el cliente está "con deuda pendiente en dicha relación"
 --
--- DÍAS SUBSIGUIENTES:
--- - Pueden sumarse/activarse deudas de otros clientes
--- - es_dia_apertura = FALSE
--- - es_gestionable = depende de si tiene asignación
--- - es_medible = FALSE (no cuentan para competencia)
--- - tipo_activacion = 'SUBSIGUIENTE' o 'REACTIVACION'
+-- LÓGICA DE NEGOCIO:
+-- - es_gestionable: TRUE solo si tiene asignación
+-- - es_medible: TRUE solo si (es_gestionable AND fecha_deuda = fecha_trandeuda)
+-- - monto_medible: monto_exigible solo si es_medible, sino 0
+--
+-- DÍAS DE APERTURA vs SUBSIGUIENTES:
+-- - Día apertura: Cuando fecha_proceso = FECHA_ASIGNACION en calendario
+-- - Días subsiguientes: Pueden activarse nuevas deudas
+-- - Medibilidad: No depende del tipo de día, sino de la coincidencia con FECHA_TRANDEUDA
 --
 -- REGLAS DE MERGE:
 -- - Se actualizan montos y estados de deudas existentes
 -- - Se insertan nuevas activaciones manteniendo historial
--- - Se preserva la lógica de medibilidad según día de activación
+-- - Se preserva la lógica de medibilidad según coincidencia con calendario
