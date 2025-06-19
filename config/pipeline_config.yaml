@@ -1,0 +1,48 @@
+# Configuración del Pipeline de Cobranzas FACO
+# ================================================
+
+pipeline:
+  name: "faco_cobranzas_pipeline"
+  version: "1.0.0"
+  environment: "production"
+
+# Configuración de BigQuery
+bigquery:
+  project_id: "mibot-222814"
+  dataset_staging: "BI_USA"
+  dataset_analytics: "BI_USA"
+  
+# Configuración del Stage de Asignación
+stage_asignacion:
+  table_name: "bi_P3fV4dWNeMkN5RJMhV8e_stg_asignacion"
+  stored_procedure: "bi_P3fV4dWNeMkN5RJMhV8e_sp_asignacion"
+  source_table: "batch_P3fV4dWNeMkN5RJMhV8e_asignacion"
+  calendar_table: "bi_P3fV4dWNeMkN5RJMhV8e_dash_calendario_v5"
+  
+  # Llaves primarias
+  primary_keys:
+    - "cod_luna"
+    - "cod_cuenta" 
+    - "archivo"
+    
+  # Campos para merge
+  merge_fields:
+    - "estado_cartera"
+    - "saldo_dia"
+    - "fecha_actualizacion"
+    
+  # Reglas de negocio
+  business_rules:
+    objetivos_recupero:
+      AL_VCTO: 0.15
+      ENTRE_4_Y_15D: 0.25
+      TEMPRANA: 0.20
+      DEFAULT: 0.20
+      
+    categorias_vencimiento:
+      dias_por_vencer: [30, 60, 90]
+      
+# Configuración de logging
+logging:
+  level: "INFO"
+  format: "json"
