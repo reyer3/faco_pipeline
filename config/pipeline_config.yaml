@@ -3,7 +3,7 @@
 
 pipeline:
   name: "faco_cobranzas_pipeline"
-  version: "1.0.0"
+  version: "1.1.0"
   environment: "production"
 
 # Configuración de BigQuery
@@ -31,6 +31,24 @@ stage_asignacion:
     - "saldo_dia"
     - "fecha_actualizacion"
     
+  # Configuración de detección automática
+  auto_detection:
+    enabled: true
+    filter_by_date: "FECHA_ASIGNACION"
+    fallback_message: "No se encontraron archivos para la fecha especificada"
+    
+  # Modos de ejecución
+  execution_modes:
+    default: "INCREMENTAL"
+    options:
+      - "INCREMENTAL"  # Solo procesa registros >= fecha_proceso
+      - "FULL"         # Reprocesa todo el histórico
+      
+  # Filtros de archivos
+  file_filters:
+    auto_detect: true    # Si archivo_filter es NULL, detecta automáticamente
+    manual_override: true # Permite especificar filtros manuales
+    
   # Reglas de negocio
   business_rules:
     objetivos_recupero:
@@ -42,7 +60,48 @@ stage_asignacion:
     categorias_vencimiento:
       dias_por_vencer: [30, 60, 90]
       
+    tipos_cartera:
+      TEMPRANA: "TEMPRANA"
+      CF_ANN: "CUOTA_FRACCIONAMIENTO" 
+      AN: "ALTAS_NUEVAS"
+      DEFAULT: "OTRAS"
+      
+    fraccionamiento:
+      values: ["FRACCIONADO", "NORMAL"]
+      default: "NORMAL"
+      
 # Configuración de logging
 logging:
   level: "INFO"
   format: "json"
+  capture_metrics: true
+  log_detected_files: true  # Nuevo: registra archivos detectados automáticamente
+  
+# Configuración de calidad de datos
+data_quality:
+  tests_enabled: true
+  success_rate_threshold: 95.0
+  tests:
+    - "unique_primary_keys"
+    - "not_null_validation"
+    - "objetivo_recupero_range"
+    - "categoria_vencimiento_values"
+    - "calendar_join_completeness"
+    
+# Configuración de monitoreo
+monitoring:
+  alerts:
+    duration_threshold_minutes: 30
+    volume_variation_threshold: 50.0
+    quality_threshold: 95.0
+    no_files_detected: true  # Nuevo: alerta si no se detectan archivos
+    
+# Configuración de optimización
+optimization:
+  partitioning:
+    enabled: true
+    field: "fecha_asignacion"
+    type: "DATE"
+  clustering:
+    enabled: true
+    fields: ["cod_luna", "tipo_cartera", "segmento_gestion"]
