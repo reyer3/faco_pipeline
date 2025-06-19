@@ -3,14 +3,14 @@
 -- ================================================================
 -- Autor: FACO Team
 -- Fecha: 2025-06-19
--- Versión: 1.0.0
+-- Versión: 1.1.0
 -- Descripción: Procesamiento y transformación de datos de asignación
---              para reportería de gestión de cobranzas
+--              con detección automática de archivos por fecha
 -- ================================================================
 
 CREATE OR REPLACE PROCEDURE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_asignacion`(
   IN p_fecha_proceso DATE DEFAULT CURRENT_DATE(),
-  IN p_archivo_filter STRING DEFAULT NULL,
+  IN p_archivo_filter STRING DEFAULT NULL,  -- OPCIONAL: Si es NULL, detecta automáticamente
   IN p_modo_ejecucion STRING DEFAULT 'INCREMENTAL' -- 'FULL' o 'INCREMENTAL'
 )
 BEGIN
@@ -20,6 +20,26 @@ BEGIN
   DECLARE v_registros_procesados INT64 DEFAULT 0;
   DECLARE v_registros_nuevos INT64 DEFAULT 0;
   DECLARE v_registros_actualizados INT64 DEFAULT 0;
+  DECLARE v_archivos_detectados STRING DEFAULT '';
+  
+  -- ================================================================
+  -- DETECCIÓN AUTOMÁTICA DE ARCHIVOS (si no se especifica filtro)
+  -- ================================================================
+  
+  -- Si no se especifica archivo, detectar automáticamente por fecha
+  IF p_archivo_filter IS NULL THEN
+    SELECT STRING_AGG(ARCHIVO, ', ') 
+    INTO v_archivos_detectados
+    FROM `mibot-222814.BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_dash_calendario_v5`
+    WHERE FECHA_ASIGNACION = p_fecha_proceso;
+    
+    -- Si no hay archivos para la fecha, usar modo general
+    IF v_archivos_detectados IS NULL OR v_archivos_detectados = '' THEN
+      SET v_archivos_detectados = 'No se encontraron archivos para la fecha especificada';
+    END IF;
+  ELSE
+    SET v_archivos_detectados = CONCAT('Filtro manual: ', p_archivo_filter);
+  END IF;
   
   -- ================================================================
   -- LOGGING: Inicio del proceso
@@ -29,7 +49,8 @@ BEGIN
     etapa, 
     fecha_inicio, 
     parametros, 
-    estado
+    estado,
+    observaciones
   ) 
   VALUES (
     'faco_pipeline', 
@@ -37,10 +58,12 @@ BEGIN
     v_inicio_proceso,
     JSON_OBJECT(
       'fecha_proceso', CAST(p_fecha_proceso AS STRING),
-      'archivo_filter', IFNULL(p_archivo_filter, 'ALL'),
-      'modo_ejecucion', p_modo_ejecucion
+      'archivo_filter', IFNULL(p_archivo_filter, 'AUTO_DETECT'),
+      'modo_ejecucion', p_modo_ejecucion,
+      'archivos_detectados', v_archivos_detectados
     ),
-    'INICIADO'
+    'INICIADO',
+    CONCAT('Archivos detectados: ', v_archivos_detectados)
   );
   
   -- ================================================================
@@ -122,7 +145,15 @@ BEGIN
       ON asig.archivo = CONCAT(cal.ARCHIVO, '.txt')
     
     WHERE 
-      (p_archivo_filter IS NULL OR asig.archivo LIKE CONCAT('%', p_archivo_filter, '%'))
+      -- 🎯 FILTRO INTELIGENTE DE ARCHIVOS
+      (
+        -- Si se especifica filtro manual, aplicarlo
+        (p_archivo_filter IS NOT NULL AND asig.archivo LIKE CONCAT('%', p_archivo_filter, '%'))
+        OR
+        -- Si no hay filtro, usar detección automática por fecha
+        (p_archivo_filter IS NULL AND cal.FECHA_ASIGNACION = p_fecha_proceso)
+      )
+      -- 🔄 FILTRO POR MODO DE EJECUCIÓN  
       AND (p_modo_ejecucion = 'FULL' OR cal.FECHA_ASIGNACION >= p_fecha_proceso)
       
   ) AS source
@@ -192,7 +223,23 @@ BEGIN
     v_registros_nuevos,
     v_registros_actualizados,
     'COMPLETADO',
-    CONCAT('Proceso completado exitosamente. Modo: ', p_modo_ejecucion)
+    CONCAT('Proceso completado. Modo: ', p_modo_ejecucion, '. Archivos: ', v_archivos_detectados)
   );
+  
+  -- ================================================================
+  -- INFORMACIÓN DE DEPURACIÓN (opcional, comentar en producción)
+  -- ================================================================
+  
+  -- Mostrar resumen del proceso
+  SELECT 
+    'RESUMEN_PROCESO' as tipo,
+    p_fecha_proceso as fecha_proceso,
+    IFNULL(p_archivo_filter, 'AUTO_DETECT') as filtro_archivo,
+    p_modo_ejecucion as modo,
+    v_archivos_detectados as archivos_detectados,
+    v_registros_procesados as registros_procesados,
+    v_registros_nuevos as registros_nuevos,
+    v_registros_actualizados as registros_actualizados,
+    TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), v_inicio_proceso, SECOND) as duracion_segundos;
   
 END;
