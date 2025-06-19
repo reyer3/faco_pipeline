@@ -2,15 +2,15 @@
 
 ## 📋 Resumen Ejecutivo
 
-El **Stage de Deudas** es el segundo componente del pipeline de datos de gestión de cobranzas FACO. Procesa las deudas diarias refrescadas aplicando **lógica compleja de día de apertura vs días subsiguientes**, determinando qué clientes son gestionables y medibles para competencia.
+El **Stage de Deudas** es el segundo componente del pipeline de datos de gestión de cobranzas FACO. Procesa las deudas diarias refrescadas aplicando **lógica específica de medibilidad basada en la coincidencia entre la fecha del archivo TRAN_DEUDA y el campo FECHA_TRANDEUDA del calendario**.
 
 ## 🎯 Objetivos
 
 - **Procesamiento Diario**: Manejo de deudas refrescadas diariamente desde archivos TRAN_DEUDA
-- **Lógica de Apertura**: Distinguir día de apertura vs días subsiguientes de cartera
-- **Filtrado Inteligente**: Identificar clientes gestionables y medibles según tipo de día
+- **Medibilidad Precisa**: Determinar clientes medibles por coincidencia fecha archivo vs FECHA_TRANDEUDA
+- **Filtrado Inteligente**: Identificar clientes gestionables basado en asignación
 - **Construcción de Fechas**: Extraer fecha del nombre de archivo usando regex
-- **Integración**: Join con datos de asignación para determinar gestionabilidad
+- **Integración**: Join con calendario y asignación para determinar medibilidad
 
 ## 🏗️ Arquitectura
 
@@ -37,43 +37,57 @@ PRIMARY KEY (cod_cuenta, nro_documento, archivo, fecha_deuda)
 | Categoría | Campos | Descripción |
 |-----------|--------|--------------| 
 | **Deuda** | `cod_cuenta`, `nro_documento`, `monto_exigible` | Identificación y valor de deuda |
-| **Temporal** | `fecha_deuda`, `fecha_deuda_construida` | Fechas extraídas del archivo |
-| **Negocio** | `es_dia_apertura`, `es_gestionable`, `es_medible` | Flags de lógica de negocio |
-| **Activación** | `tipo_activacion`, `secuencia_activacion` | Control de activaciones |
+| **Temporal** | `fecha_deuda`, `fecha_trandeuda` | Fechas clave para medibilidad |
+| **Negocio** | `es_gestionable`, `es_medible` | Flags de lógica de negocio |
 | **Financiera** | `monto_gestionable`, `monto_medible` | Montos calculados por reglas |
 
-## 🧠 Lógica de Negocio Compleja
+## 🔥 **Lógica de Medibilidad - Regla Principal**
 
-### 🟢 Día de Apertura de Cartera
+### **Condición de Medibilidad**
+Un cliente es **MEDIBLE** solo cuando se cumplen **AMBAS** condiciones:
 
-**Condición**: `fecha_proceso` coincide con `FECHA_ASIGNACION` en calendario
+1. ✅ **Tiene asignación** (`es_gestionable = TRUE`)
+2. ✅ **Coincidencia de fechas**: `fecha_deuda_construida = FECHA_TRANDEUDA`
 
-**Comportamiento**:
-- ✅ **Filtro Estricto**: Solo clientes que pasan a "gestionables y medibles"
-- ✅ **es_gestionable = TRUE**: Solo si tienen asignación
-- ✅ **es_medible = TRUE**: Solo si son gestionables Y es día de apertura
-- ✅ **tipo_activacion = 'APERTURA'**
-- ✅ **Cuentan para competencia**: `monto_medible > 0`
+```sql
+-- Lógica implementada
+es_medible = CASE 
+  WHEN asig.cod_cuenta IS NOT NULL 
+       AND fecha_deuda_construida = cal.FECHA_TRANDEUDA 
+  THEN TRUE 
+  ELSE FALSE 
+END
+```
 
-### 🟡 Días Subsiguientes
+### **Join Crítico con Calendario**
+```sql
+-- El join se hace por FECHA_TRANDEUDA, no por FECHA_ASIGNACION
+LEFT JOIN calendario AS cal
+  ON fecha_deuda_construida = cal.FECHA_TRANDEUDA
+```
 
-**Condición**: `fecha_proceso` NO coincide con `FECHA_ASIGNACION`
+## 🧠 Lógica de Negocio Corregida
 
-**Comportamiento**:
-- ⚠️ **Inclusión Amplia**: Pueden sumarse/activarse deudas de otros clientes
-- ⚠️ **es_gestionable**: Depende si tienen asignación (pueden no tenerla)
-- ❌ **es_medible = FALSE**: NO cuentan para competencia
-- ⚠️ **tipo_activacion = 'SUBSIGUIENTE'**
-- ❌ **No miden competencia**: `monto_medible = 0`
+### 🔄 Nueva Tabla de Decisiones
 
-### 🔄 Tabla de Decisiones
+| Escenario | tiene_asignacion | fecha_coincide_trandeuda | es_gestionable | es_medible | monto_medible |
+|-----------|------------------|--------------------------|----------------|------------|---------------|
+| **Con asignación + Coincide fecha** | ✅ TRUE | ✅ TRUE | ✅ TRUE | ✅ TRUE | = monto_exigible |
+| **Con asignación + No coincide** | ✅ TRUE | ❌ FALSE | ✅ TRUE | ❌ FALSE | 0 |
+| **Sin asignación + Coincide fecha** | ❌ FALSE | ✅ TRUE | ❌ FALSE | ❌ FALSE | 0 |
+| **Sin asignación + No coincide** | ❌ FALSE | ❌ FALSE | ❌ FALSE | ❌ FALSE | 0 |
 
-| Escenario | es_dia_apertura | tiene_asignacion | es_gestionable | es_medible | monto_medible |
-|-----------|-----------------|------------------|----------------|------------|---------------|
-| Apertura + Asignado | TRUE | TRUE | TRUE | TRUE | = monto_exigible |
-| Apertura + No Asignado | TRUE | FALSE | FALSE | FALSE | 0 |
-| Subsiguiente + Asignado | FALSE | TRUE | TRUE | FALSE | 0 |
-| Subsiguiente + No Asignado | FALSE | FALSE | FALSE | FALSE | 0 |
+### 🎯 Diferencias Clave vs Versión Anterior
+
+#### **❌ Antes (Incorrecto)**
+- Medible = Gestionable AND día_apertura
+- Join por FECHA_ASIGNACION
+- Todos los gestionables del día de apertura eran medibles
+
+#### **✅ Ahora (Correcto)**
+- Medible = Gestionable AND (fecha_archivo = FECHA_TRANDEUDA)
+- Join por FECHA_TRANDEUDA
+- Solo los que coinciden específicamente con FECHA_TRANDEUDA son medibles
 
 ## 🔧 Construcción de Fecha desde Archivo
 
@@ -83,83 +97,61 @@ TRAN_DEUDA_DDMM
 Ejemplo: TRAN_DEUDA_1906 → 19/06/2025
 ```
 
-### Lógica de Extracción
+### Lógica de Extracción (sin cambios)
 ```sql
 CASE 
   WHEN REGEXP_CONTAINS(archivo, r'TRAN_DEUDA_(\\d{4})') THEN
     SAFE.PARSE_DATE('%Y-%m-%d', 
       CONCAT(
         CAST(EXTRACT(YEAR FROM creado_el) AS STRING), '-',
-        SUBSTR(REGEXP_EXTRACT(archivo, r'TRAN_DEUDA_(\\d{4})'), 3, 2), '-',  -- MM
-        SUBSTR(REGEXP_EXTRACT(archivo, r'TRAN_DEUDA_(\\d{4})'), 1, 2)       -- DD
+        SUBSTR(REGEXP_EXTRACT(archivo, r'TRAN_DEUDA_(\\d{4})'), 3, 2), '-',
+        SUBSTR(REGEXP_EXTRACT(archivo, r'TRAN_DEUDA_(\\d{4})'), 1, 2)
       )
     )
   ELSE DATE(creado_el)
 END AS fecha_deuda_construida
 ```
 
-## 🔍 Detección Automática
-
-### Detección de Día de Apertura
-```sql
--- Verificar si es día de apertura
-SELECT COUNT(*) > 0
-FROM calendario 
-WHERE FECHA_ASIGNACION = p_fecha_proceso
-```
+## 🔍 Detección y Joins
 
 ### Detección de Archivos TRAN_DEUDA
 ```sql
--- Formato esperado: TRAN_DEUDA_DDMM para la fecha
+-- Sin cambios - sigue detectando por formato DDMM
 DECLARE fecha_ddmm STRING DEFAULT FORMAT_DATE('%d%m', p_fecha_proceso);
-
 SELECT STRING_AGG(DISTINCT archivo, ', ')
 FROM batch_tran_deuda
 WHERE REGEXP_CONTAINS(archivo, CONCAT(r'TRAN_DEUDA_', fecha_ddmm))
 ```
 
-## 🎮 Modos de Ejecución
-
-### 1. Automático por Fecha (Recomendado)
+### Join con Calendario (CORREGIDO)
 ```sql
--- Detecta automáticamente archivos y tipo de día
-CALL `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_deudas`(
-  '2025-06-19'  -- fecha_proceso
-);
+-- NUEVO: Join por FECHA_TRANDEUDA en lugar de FECHA_ASIGNACION
+LEFT JOIN calendario AS cal
+  ON fecha_deuda_construida = cal.FECHA_TRANDEUDA
 ```
 
-### 2. Filtro Manual por Archivo
+### Join con Asignación
 ```sql
--- Procesa archivo específico
-CALL `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_deudas`(
-  CURRENT_DATE(),
-  'TRAN_DEUDA_1906'  -- archivo específico
-);
+-- Mantiene join con asignación para determinar gestionabilidad
+LEFT JOIN asignacion AS asig
+  ON deu.cod_cuenta = asig.cod_cuenta
+  AND cal.FECHA_ASIGNACION = asig.fecha_asignacion
 ```
 
-### 3. Full Refresh
-```sql
--- Reprocesa histórico completo
-CALL `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_deudas`(
-  CURRENT_DATE(),
-  NULL,
-  'FULL'
-);
-```
-
-## 📊 Métricas de Negocio
+## 📊 Métricas de Negocio Corregidas
 
 ### Cálculos Automáticos
 ```sql
--- Monto gestionable
+-- Monto gestionable (sin cambios)
 monto_gestionable = CASE 
   WHEN es_gestionable THEN monto_exigible 
   ELSE 0 
 END
 
--- Monto medible (solo día apertura)
+-- Monto medible (CORREGIDO)
 monto_medible = CASE 
-  WHEN es_gestionable AND es_dia_apertura THEN monto_exigible 
+  WHEN es_gestionable AND fecha_deuda_construida = fecha_trandeuda 
+  THEN monto_exigible 
   ELSE 0 
 END
 ```
@@ -167,110 +159,124 @@ END
 ### Resumen por Procesamiento
 - **Total deudas**: Todas las deudas procesadas
 - **Deudas gestionables**: Con asignación
-- **Deudas medibles**: Gestionables en día de apertura
-- **Monto total**: Suma de todos los `monto_exigible`
-- **Monto gestionable**: Solo deudas con asignación
-- **Monto medible**: Solo día apertura + asignación
+- **Deudas medibles**: Gestionables + coincidencia FECHA_TRANDEUDA
+- **Fechas con calendario**: Cuántas fechas tienen entrada en calendario
+- **Monto medible por TRANDEUDA**: Solo las que coinciden específicamente
 
-## 🔄 Proceso de Merge
+## 🎮 Modos de Ejecución
 
-### WHEN MATCHED (Actualización)
-- `monto_exigible`
-- `estado_deuda`
-- `monto_gestionable`
-- `monto_medible`
-- `fecha_actualizacion`
+### 1. Automático por Fecha (Recomendado)
+```sql
+-- Detecta automáticamente archivos y determina medibilidad
+CALL `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_deudas`(
+  '2025-06-19'  -- fecha_proceso
+);
+```
 
-### WHEN NOT MATCHED (Inserción)
-- Todos los campos del registro nuevo
-- Preserva secuencia de activación
-- Mantiene historial de cambios
+### 2. Verificación de Coincidencias
+```sql
+-- Consulta para verificar coincidencias FECHA_TRANDEUDA
+SELECT 
+  fecha_deuda_construida,
+  COUNT(*) as deudas_total,
+  COUNT(CASE WHEN fecha_trandeuda IS NOT NULL THEN 1 END) as con_calendario,
+  COUNT(CASE WHEN es_medible THEN 1 END) as medibles
+FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas`
+WHERE fecha_proceso = CURRENT_DATE()
+GROUP BY fecha_deuda_construida
+ORDER BY fecha_deuda_construida;
+```
 
-## 🧪 Tests de Calidad
+## 🧪 Tests de Calidad Actualizados
 
-### Tests Específicos de Deudas
+### Tests Específicos Corregidos
 1. **Unicidad de llaves primarias**
 2. **Construcción correcta de fechas desde archivo**
-3. **Consistencia de lógica día de apertura**
-4. **Cálculos correctos de montos medibles/gestionables**
-5. **Validación de tipos de activación**
+3. **Consistencia join con FECHA_TRANDEUDA**
+4. **Validación lógica medibilidad**: `es_medible = TRUE` solo si `fecha_deuda = fecha_trandeuda`
+5. **Cálculos correctos de montos medibles**
 6. **Consistencia asignación vs gestionabilidad**
-7. **Rangos válidos de montos**
-8. **Comparativo métricas por tipo de día**
 
-### Alertas de Negocio
-- ⚠️ **Sin deudas medibles en apertura**: Posible problema
-- ⚠️ **Deudas medibles en subsiguiente**: Inconsistencia lógica
-- ❌ **Montos negativos**: Error de datos
-- ❌ **Fechas no construidas**: Problema de regex
-
-## 📈 Optimización
-
-### Particionado
-- **Partición**: `DATE(fecha_deuda)`
-- **Beneficio**: Optimiza consultas temporales
-
-### Clustering
-- **Campos**: `cod_cuenta`, `tipo_activacion`, `es_medible`
-- **Beneficio**: Mejora filtros por gestionabilidad
-
-## 🔍 Monitoreo Específico
-
-### Métricas Clave
-- **Ratio día apertura**: % de días que son apertura
-- **% Gestionables**: Deudas con asignación / Total
-- **% Medibles**: Solo en días de apertura
-- **Monto promedio**: Por tipo de activación
-- **Distribución tipos**: APERTURA vs SUBSIGUIENTE
-
-### Alertas Recomendadas
-- **No archivos detectados**: Para fecha específica
-- **Sin deudas medibles en apertura**: Revisión necesaria
-- **Ratio anormal**: Variación > 30% vs histórico
-- **Montos inconsistentes**: Diferencias en cálculos
-
-## 📝 Casos de Uso
-
-### Escenario 1: Día de Apertura Nueva Cartera
-```
-Fecha: 2025-06-19 (nueva cartera TEMPRANA)
-Resultado: 
-- es_dia_apertura = TRUE
-- Solo clientes asignados son gestionables
-- Solo gestionables son medibles
-- tipo_activacion = 'APERTURA'
+### Test Específico de Medibilidad
+```sql
+-- Verificar que todos los medibles tienen coincidencia FECHA_TRANDEUDA
+WITH test_medibilidad AS (
+  SELECT COUNT(*) as registros_inconsistentes
+  FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas`
+  WHERE es_medible = TRUE 
+    AND (fecha_trandeuda IS NULL OR fecha_deuda != fecha_trandeuda)
+    AND fecha_proceso = CURRENT_DATE()
+)
+SELECT 
+  'TEST_MEDIBILIDAD_TRANDEUDA' as test_name,
+  registros_inconsistentes as violaciones,
+  CASE WHEN registros_inconsistentes = 0 THEN 'PASS' ELSE 'FAIL' END as resultado
+FROM test_medibilidad;
 ```
 
-### Escenario 2: Día Subsiguiente
-```
-Fecha: 2025-06-20 (día siguiente)
-Resultado:
-- es_dia_apertura = FALSE  
-- Pueden activarse nuevos clientes
-- Ninguno es medible (monto_medible = 0)
-- tipo_activacion = 'SUBSIGUIENTE'
+## 📈 Métricas de Monitoreo
+
+### Alertas Específicas Actualizadas
+- ⚠️ **Pocas coincidencias TRANDEUDA**: Si < 50% de archivos tienen calendario
+- ⚠️ **Sin deudas medibles**: Cuando hay archivos pero no coincidencias
+- ❌ **Inconsistencia medibilidad**: Medibles sin coincidencia FECHA_TRANDEUDA
+- 📊 **Ratio anormal**: Variación > 30% en % medibles vs histórico
+
+### Dashboard de Coincidencias
+```sql
+-- Monitoreo de coincidencias por fecha
+SELECT 
+  fecha_deuda_construida,
+  COUNT(*) as total_deudas,
+  COUNT(CASE WHEN fecha_trandeuda IS NOT NULL THEN 1 END) as con_calendario,
+  COUNT(CASE WHEN es_medible THEN 1 END) as medibles,
+  ROUND(COUNT(CASE WHEN fecha_trandeuda IS NOT NULL THEN 1 END) / COUNT(*) * 100, 2) as pct_con_calendario,
+  ROUND(COUNT(CASE WHEN es_medible THEN 1 END) / COUNT(*) * 100, 2) as pct_medible
+FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas`
+WHERE fecha_proceso >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+GROUP BY fecha_deuda_construida
+ORDER BY fecha_deuda_construida DESC;
 ```
 
-### Escenario 3: Reactivación
+## 🔄 Casos de Uso Específicos
+
+### Escenario 1: Archivo con Coincidencia TRANDEUDA
 ```
-Cliente con deuda previa que se reactiva
-- Mantiene secuencia_activacion incremental
-- Sigue reglas según tipo de día
-- Preserva historial de activaciones
+Archivo: TRAN_DEUDA_1906 → fecha_construida = 2025-06-19
+Calendario: FECHA_TRANDEUDA = 2025-06-19
+Cliente: Tiene asignación
+Resultado: es_medible = TRUE, monto_medible = monto_exigible
 ```
 
-## 🛠️ Troubleshooting
+### Escenario 2: Archivo sin Coincidencia TRANDEUDA  
+```
+Archivo: TRAN_DEUDA_2006 → fecha_construida = 2025-06-20
+Calendario: No existe FECHA_TRANDEUDA = 2025-06-20
+Cliente: Tiene asignación
+Resultado: es_medible = FALSE, monto_medible = 0
+```
+
+### Escenario 3: Coincidencia sin Asignación
+```
+Archivo: TRAN_DEUDA_1906 → fecha_construida = 2025-06-19
+Calendario: FECHA_TRANDEUDA = 2025-06-19  
+Cliente: No tiene asignación
+Resultado: es_medible = FALSE, monto_medible = 0
+```
+
+## 🛠️ Troubleshooting Actualizado
 
 | Problema | Causa Probable | Solución |
 |----------|----------------|-----------| 
-| Fecha no construida | Formato archivo incorrecto | Verificar patrón TRAN_DEUDA_DDMM |
-| Sin deudas medibles en apertura | Falta join con asignación | Verificar carga previa de asignación |
-| Inconsistencia día apertura | Error en calendario | Validar FECHA_ASIGNACION |
-| Montos incorrectos | Lógica de cálculo fallida | Revisar reglas es_gestionable/es_medible |
+| **Pocas deudas medibles** | Pocas coincidencias FECHA_TRANDEUDA | Verificar configuración calendario |
+| **Sin coincidencias** | FECHA_TRANDEUDA mal configurada | Validar fechas en tabla calendario |
+| **Medibles sin calendario** | Error en join FECHA_TRANDEUDA | Revisar lógica de join |
+| **Inconsistencia fechas** | Formato archivo incorrecto | Verificar regex construcción fecha |
 
 ---
 
-**Versión**: 1.0.0  
+**Versión**: 1.1.0  
 **Fecha**: 2025-06-19  
 **Autor**: FACO Team  
+**Cambio Crítico**: Medibilidad basada en coincidencia con FECHA_TRANDEUDA del calendario  
 **Dependencias**: Stage de Asignación (debe ejecutarse primero)
