@@ -8,46 +8,63 @@
 --              con marcadores de mejor gestión por canal separado
 -- ================================================================
 
-CREATE OR REPLACE PROCEDURE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_gestiones`(
-  IN p_fecha_proceso DATE DEFAULT CURRENT_DATE(),
-  IN p_canal_filter STRING DEFAULT NULL,  -- OPCIONAL: 'BOT', 'HUMANO' o NULL para ambos
-  IN p_modo_ejecucion STRING DEFAULT 'INCREMENTAL' -- 'FULL' o 'INCREMENTAL'
-)
-BEGIN
-  
-  -- Variables de control
-  DECLARE v_inicio_proceso TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
-  DECLARE v_registros_procesados INT64 DEFAULT 0;
-  DECLARE v_registros_nuevos INT64 DEFAULT 0;
-  DECLARE v_registros_actualizados INT64 DEFAULT 0;
-  DECLARE v_canales_detectados STRING DEFAULT '';
-  DECLARE v_gestiones_bot INT64 DEFAULT 0;
-  DECLARE v_gestiones_humano INT64 DEFAULT 0;
+    CREATE OR REPLACE PROCEDURE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_gestiones`(
+      IN p_fecha_proceso DATE,
+      IN p_canal_filter STRING,
+      IN p_modo_ejecucion STRING
+    )
+    BEGIN
+      -- Variables de control
+      DECLARE v_inicio_proceso TIMESTAMP;
+      DECLARE v_registros_procesados INT64;
+      DECLARE v_registros_nuevos INT64;
+      DECLARE v_registros_actualizados INT64;
+      DECLARE v_canales_detectados STRING;
+      DECLARE v_gestiones_bot INT64;
+      DECLARE v_gestiones_humano INT64;
+
+      -- Inicialización de variables
+      SET v_inicio_proceso = CURRENT_TIMESTAMP();
+      SET v_registros_procesados = 0;
+      SET v_registros_nuevos = 0;
+      SET v_registros_actualizados = 0;
+      SET v_canales_detectados = '';
+      SET v_gestiones_bot = 0;
+      SET v_gestiones_humano = 0;
+      
+      -- Asignar valores por defecto si los parámetros son NULL
+      SET p_fecha_proceso = IFNULL(p_fecha_proceso, CURRENT_DATE());
+      SET p_modo_ejecucion = IFNULL(p_modo_ejecucion, 'INCREMENTAL');
+      SET p_canal_filter = IFNULL(p_canal_filter, NULL);
+
+
   
   -- ================================================================
   -- DETECCIÓN DE CANALES Y VOLÚMENES
   -- ================================================================
-  
-  -- Detectar gestiones BOT disponibles para la fecha
-  SELECT COUNT(*)
-  INTO v_gestiones_bot
-  FROM `mibot-222814.BI_USA.voicebot_P3fV4dWNeMkN5RJMhV8e`
-  WHERE DATE(date) = p_fecha_proceso
-    AND SAFE_CAST(document AS INT64) IS NOT NULL;
-  
-  -- Detectar gestiones HUMANO disponibles para la fecha
-  SELECT COUNT(*)
-  INTO v_gestiones_humano
-  FROM `mibot-222814.BI_USA.mibotair_P3fV4dWNeMkN5RJMhV8e`
-  WHERE DATE(date) = p_fecha_proceso
-    AND SAFE_CAST(document AS INT64) IS NOT NULL;
-  
-  -- Construir resumen de canales detectados
-  SET v_canales_detectados = CONCAT(
-    'BOT: ', CAST(v_gestiones_bot AS STRING),
-    ', HUMANO: ', CAST(v_gestiones_humano AS STRING)
-  );
-  
+      
+    -- Detectar gestiones BOT disponibles para la fecha
+    SET v_gestiones_bot = (
+      SELECT COUNT(*) 
+      FROM `mibot-222814.BI_USA.voicebot_P3fV4dWNeMkN5RJMhV8e`
+      WHERE DATE(date) = p_fecha_proceso
+        AND SAFE_CAST(document AS INT64) IS NOT NULL
+    );
+
+    -- Detectar gestiones HUMANO disponibles para la fecha
+    SET v_gestiones_humano = (
+      SELECT COUNT(*) 
+      FROM `mibot-222814.BI_USA.mibotair_P3fV4dWNeMkN5RJMhV8e`
+      WHERE DATE(date) = p_fecha_proceso
+        AND SAFE_CAST(document AS INT64) IS NOT NULL
+    );
+
+    -- Construir resumen de canales detectados
+    SET v_canales_detectados = CONCAT(
+      'BOT: ', CAST(v_gestiones_bot AS STRING),
+      ', HUMANO: ', CAST(v_gestiones_humano AS STRING)
+    );
+
   -- ================================================================
   -- LOGGING: Inicio del proceso
   -- ================================================================
@@ -439,13 +456,16 @@ BEGIN
   
   SET v_registros_procesados = @@row_count;
   
-  -- Obtener estadísticas detalladas
-  SELECT COUNT(*) INTO v_registros_nuevos
-  FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones`
-  WHERE fecha_carga = v_inicio_proceso;
-  
-  SET v_registros_actualizados = v_registros_procesados - v_registros_nuevos;
-  
+    -- Obtener estadísticas detalladas
+    SET v_registros_nuevos = (
+      SELECT COUNT(*) 
+      FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones`
+      WHERE DATE(fecha_carga) = DATE(v_inicio_proceso)
+    );
+
+    SET v_registros_actualizados = v_registros_procesados - v_registros_nuevos;
+
+      
   -- Log final con métricas de negocio
   INSERT INTO `BI_USA.pipeline_logs` (
     proceso, 
