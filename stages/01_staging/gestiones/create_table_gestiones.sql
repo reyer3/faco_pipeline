@@ -3,7 +3,7 @@
 -- ================================================================
 -- Autor: FACO Team
 -- Fecha: 2025-06-20
--- Versión: 1.4.0 - CORREGIDA para BigQuery
+-- Versión: 1.5.0 - CORREGIDA particionado
 -- Descripción: Tabla staging para gestiones unificadas BOT + HUMANO
 --              con marcadores de mejor gestión por canal separado
 -- ================================================================
@@ -134,7 +134,7 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones` (
 )
 
 -- 🔍 CONFIGURACIÓN DE PARTICIONADO Y CLUSTERING
-PARTITION BY fecha_gestion
+PARTITION BY DATE(fecha_gestion)
 CLUSTER BY cod_luna, archivo_cartera, canal_origen, weight_original
 
 -- 📋 OPCIONES DE TABLA
