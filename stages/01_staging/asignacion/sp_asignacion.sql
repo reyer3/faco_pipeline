@@ -89,24 +89,24 @@ BEGIN
     
     SELECT
       -- 🔑 LLAVES PRIMARIAS
-      asig.cod_luna,
-      asig.cuenta AS cod_cuenta,
+      cast(asig.cod_luna as string) AS cod_luna,
+      CAST(asig.cuenta AS STRING) AS cod_cuenta,
       COALESCE(cal.ARCHIVO, asig.archivo, 'SIN_ARCHIVO') AS archivo,
-      
+
       -- 📊 DIMENSIONES CLIENTE
-      asig.cliente,
-      asig.telefono,
+      cast(asig.cliente as string) as cliente,
+      cast(asig.telefono as string) telefono,
       COALESCE(asig.negocio, 'SIN_SERVICIO') AS servicio,
       COALESCE(asig.tramo_gestion, 'SIN_SEGMENTO') AS segmento_gestion,
       COALESCE(asig.zona, 'SIN_ZONA') AS zona_geografica,
-      
+
       -- 📅 DIMENSIONES TEMPORALES
       COALESCE(asig.min_vto, DATE('1900-01-01')) AS fecha_vencimiento,
       cal.FECHA_ASIGNACION,
       cal.FECHA_CIERRE,
       cal.FECHA_TRANDEUDA,
       cal.DIAS_GESTION,
-      
+
       -- 🎯 CATEGORIZACIÓN DE VENCIMIENTO
       CASE
         WHEN asig.min_vto IS NULL THEN 'SIN_VENCIMIENTO'
@@ -116,7 +116,7 @@ BEGIN
         WHEN asig.min_vto <= DATE_ADD(CURRENT_DATE(), INTERVAL 90 DAY) THEN 'POR_VENCER_90D'
         ELSE 'VIGENTE_MAS_90D'
       END AS categoria_vencimiento,
-      
+
       -- 📁 TIPIFICACIÓN DE CARTERA
       CASE
         WHEN CONTAINS_SUBSTR(UPPER(COALESCE(asig.archivo, '')), 'TEMPRANA') THEN 'TEMPRANA'
@@ -124,7 +124,7 @@ BEGIN
         WHEN CONTAINS_SUBSTR(UPPER(COALESCE(asig.archivo, '')), 'AN') THEN 'ALTAS_NUEVAS'
         ELSE 'OTRAS'
       END AS tipo_cartera,
-      
+
       -- 🎯 OBJETIVO DE RECUPERO
       CASE
         WHEN COALESCE(asig.tramo_gestion, '') = 'AL VCTO' THEN 0.15
@@ -132,33 +132,33 @@ BEGIN
         WHEN CONTAINS_SUBSTR(UPPER(COALESCE(asig.archivo, '')), 'TEMPRANA') THEN 0.20
         ELSE 0.20
       END AS objetivo_recupero,
-      
+
       -- 💰 FRACCIONAMIENTO
-      CASE 
-        WHEN COALESCE(asig.fraccionamiento, 'NO') = 'SI' THEN 'FRACCIONADO' 
-        ELSE 'NORMAL' 
+      CASE
+        WHEN COALESCE(asig.fraccionamiento, 'NO') = 'SI' THEN 'FRACCIONADO'
+        ELSE 'NORMAL'
       END AS tipo_fraccionamiento,
-      
+
       -- 🔢 FLAGS DE ANÁLISIS
       ROW_NUMBER() OVER (
-        PARTITION BY asig.cod_luna, COALESCE(cal.ARCHIVO, asig.archivo) 
+        PARTITION BY asig.cod_luna, COALESCE(cal.ARCHIVO, asig.archivo)
         ORDER BY asig.creado_el ASC
       ) AS flag_cliente_unico,
-      
+
       -- 📊 CAMPOS DE GESTIÓN (por implementar)
       NULL AS saldo_dia,
       'ACTIVO' AS estado_cartera,
-      
+
       -- 🕒 METADATOS
       CURRENT_TIMESTAMP() AS fecha_actualizacion,
       p_fecha_proceso AS fecha_proceso,
       v_inicio_proceso AS fecha_carga
-      
+
     FROM `mibot-222814.BI_USA.batch_P3fV4dWNeMkN5RJMhV8e_asignacion` AS asig
     INNER JOIN `mibot-222814.BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_dash_calendario_v5` AS cal
       ON asig.archivo = CONCAT(cal.ARCHIVO, '.txt')
-    
-    WHERE 
+
+    WHERE
       -- 🎯 FILTRO INTELIGENTE DE ARCHIVOS
       (
         -- Si se especifica filtro manual, aplicarlo
@@ -167,13 +167,13 @@ BEGIN
         -- Si no hay filtro, usar detección automática por fecha
         (p_archivo_filter IS NULL AND cal.FECHA_ASIGNACION = p_fecha_proceso)
       )
-      -- 🔄 FILTRO POR MODO DE EJECUCIÓN  
+      -- 🔄 FILTRO POR MODO DE EJECUCIÓN
       AND (p_modo_ejecucion = 'FULL' OR cal.FECHA_ASIGNACION >= p_fecha_proceso)
-      
+
   ) AS source
-  
-  ON target.cod_luna = source.cod_luna
-     AND target.cod_cuenta = source.cod_cuenta  
+
+  ON target.cod_luna = cast(source.cod_luna as string)
+     AND target.cod_cuenta = cast(source.cod_cuenta  as string)
      AND target.archivo = source.archivo
   
   -- 🔄 ACTUALIZAR REGISTROS EXISTENTES
