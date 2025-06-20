@@ -9,19 +9,33 @@
 -- ================================================================
 
 CREATE OR REPLACE PROCEDURE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_pagos`(
-  IN p_fecha_inicio DATE DEFAULT DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY),
-  IN p_fecha_fin DATE DEFAULT CURRENT_DATE(),
-  IN p_modo_ejecucion STRING DEFAULT 'INCREMENTAL' -- 'FULL' o 'INCREMENTAL'
+  IN p_fecha_inicio DATE,
+  IN p_fecha_fin DATE,
+  IN p_modo_ejecucion STRING
 )
 BEGIN
-  
+
   -- Variables de control
-  DECLARE v_inicio_proceso TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
-  DECLARE v_registros_procesados INT64 DEFAULT 0;
-  DECLARE v_registros_nuevos INT64 DEFAULT 0;
-  DECLARE v_registros_actualizados INT64 DEFAULT 0;
-  DECLARE v_pagos_detectados INT64 DEFAULT 0;
-  DECLARE v_periodo_analisis STRING DEFAULT '';
+  DECLARE v_inicio_proceso TIMESTAMP;
+  DECLARE v_registros_procesados INT64;
+  DECLARE v_registros_nuevos INT64;
+  DECLARE v_registros_actualizados INT64;
+  DECLARE v_pagos_detectados INT64;
+  DECLARE v_periodo_analisis STRING;
+
+  -- Inicialización
+  SET v_inicio_proceso = CURRENT_TIMESTAMP();
+  SET v_registros_procesados = 0;
+  SET v_registros_nuevos = 0;
+  SET v_registros_actualizados = 0;
+  SET v_pagos_detectados = 0;
+  SET v_periodo_analisis = ''; 
+  
+  -- Asignar valores por defecto si los parámetros son NULL
+  SET p_fecha_inicio = IFNULL(p_fecha_inicio, DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY));
+  SET p_fecha_fin = IFNULL(p_fecha_fin, CURRENT_DATE());
+  SET p_modo_ejecucion = IFNULL(p_modo_ejecucion, 'INCREMENTAL');
+
   
   -- ================================================================
   -- DETECCIÓN DE PAGOS EN EL PERÍODO
@@ -34,10 +48,12 @@ BEGIN
   );
   
   -- Contar pagos en el período
-  SELECT COUNT(*)
-  INTO v_pagos_detectados
-  FROM `mibot-222814.BI_USA.batch_P3fV4dWNeMkN5RJMhV8e_pagos`
-  WHERE DATE(fecha_pago) BETWEEN p_fecha_inicio AND p_fecha_fin;
+    SET v_pagos_detectados = (
+    SELECT COUNT(*)
+    FROM `mibot-222814.BI_USA.batch_P3fV4dWNeMkN5RJMhV8e_pagos`
+    WHERE DATE(fecha_pago) BETWEEN p_fecha_inicio AND p_fecha_fin
+  );
+
   
   -- ================================================================
   -- LOGGING: Inicio del proceso
@@ -285,9 +301,12 @@ BEGIN
   SET v_registros_procesados = @@row_count;
   
   -- Obtener estadísticas detalladas
-  SELECT COUNT(*) INTO v_registros_nuevos
-  FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_pagos`
-  WHERE fecha_carga = v_inicio_proceso;
+  SET v_registros_nuevos = (
+    SELECT COUNT(*) 
+    FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_pagos`
+    WHERE DATE(fecha_carga) = DATE(v_inicio_proceso)
+  );
+
   
   SET v_registros_actualizados = v_registros_procesados - v_registros_nuevos;
   
