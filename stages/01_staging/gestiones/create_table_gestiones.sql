@@ -134,7 +134,7 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones` (
 )
 
 -- 🔍 CONFIGURACIÓN DE PARTICIONADO Y CLUSTERING
-PARTITION BY DATE(fecha_gestion)
+PARTITION BY fecha_gestion
 CLUSTER BY cod_luna, archivo_cartera, canal_origen, weight_original
 
 -- 📋 OPCIONES DE TABLA

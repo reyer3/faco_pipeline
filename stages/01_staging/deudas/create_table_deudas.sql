@@ -80,7 +80,7 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` (
 )
 
 -- 🔍 CONFIGURACIÓN DE PARTICIONADO Y CLUSTERING
-PARTITION BY DATE(fecha_deuda)
+PARTITION BY fecha_deuda
 CLUSTER BY cod_cuenta, es_medible, fecha_trandeuda
 
 -- 📋 OPCIONES DE TABLA

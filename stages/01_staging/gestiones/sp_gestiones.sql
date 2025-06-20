@@ -3,15 +3,15 @@
 -- ================================================================
 -- Autor: FACO Team
 -- Fecha: 2025-06-19
--- Versión: 1.3.0
+-- Versión: 1.3.1 (CORREGIDO)
 -- Descripción: Procesamiento de gestiones unificadas BOT + HUMANO
 --              con marcadores de mejor gestión por canal separado
 -- ================================================================
 
 CREATE OR REPLACE PROCEDURE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_gestiones`(
-  IN p_fecha_proceso DATE DEFAULT CURRENT_DATE(),
-  IN p_canal_filter STRING DEFAULT NULL,  -- OPCIONAL: 'BOT', 'HUMANO' o NULL para ambos
-  IN p_modo_ejecucion STRING DEFAULT 'INCREMENTAL' -- 'FULL' o 'INCREMENTAL'
+  IN p_fecha_proceso DATE,
+  IN p_modo_ejecucion STRING, -- 'FULL' o 'INCREMENTAL'
+  IN p_canal_filter STRING  -- OPCIONAL: 'BOT', 'HUMANO' o NULL para ambos
 )
 BEGIN
   
@@ -23,56 +23,65 @@ BEGIN
   DECLARE v_canales_detectados STRING DEFAULT '';
   DECLARE v_gestiones_bot INT64 DEFAULT 0;
   DECLARE v_gestiones_humano INT64 DEFAULT 0;
+
+  SET p_fecha_proceso = IFNULL(p_fecha_proceso, CURRENT_DATE('America/Lima'));
+  SET p_modo_ejecucion = IFNULL(p_modo_ejecucion, 'INCREMENTAL');
   
   -- ================================================================
   -- DETECCIÓN DE CANALES Y VOLÚMENES
   -- ================================================================
   
   -- Detectar gestiones BOT disponibles para la fecha
-  SELECT COUNT(*)
-  INTO v_gestiones_bot
-  FROM `mibot-222814.BI_USA.voicebot_P3fV4dWNeMkN5RJMhV8e`
-  WHERE DATE(date) = p_fecha_proceso
-    AND SAFE_CAST(document AS INT64) IS NOT NULL;
-  
+  SET v_gestiones_bot = (
+    SELECT COUNT(*)
+    FROM `mibot-222814.BI_USA.voicebot_P3fV4dWNeMkN5RJMhV8e`
+    WHERE DATE(date) = p_fecha_proceso
+      AND SAFE_CAST(document AS INT64) IS NOT NULL
+  );
+
   -- Detectar gestiones HUMANO disponibles para la fecha
-  SELECT COUNT(*)
-  INTO v_gestiones_humano
-  FROM `mibot-222814.BI_USA.mibotair_P3fV4dWNeMkN5RJMhV8e`
-  WHERE DATE(date) = p_fecha_proceso
-    AND SAFE_CAST(document AS INT64) IS NOT NULL;
-  
+  SET v_gestiones_humano = (
+    SELECT COUNT(*)
+    FROM `mibot-222814.BI_USA.mibotair_P3fV4dWNeMkN5RJMhV8e`
+    WHERE DATE(date) = p_fecha_proceso
+      AND SAFE_CAST(document AS INT64) IS NOT NULL
+  );
+
   -- Construir resumen de canales detectados
   SET v_canales_detectados = CONCAT(
     'BOT: ', CAST(v_gestiones_bot AS STRING),
     ', HUMANO: ', CAST(v_gestiones_humano AS STRING)
   );
   
-  -- ================================================================
+ -- ================================================================
   -- LOGGING: Inicio del proceso
   -- ================================================================
   INSERT INTO `BI_USA.pipeline_logs` (
-    proceso, 
-    etapa, 
-    fecha_inicio, 
-    parametros, 
-    estado,
-    observaciones
-  ) 
-  VALUES (
-    'faco_pipeline', 
-    'stage_gestiones', 
-    v_inicio_proceso,
-    JSON_OBJECT(
-      'fecha_proceso', CAST(p_fecha_proceso AS STRING),
-      'canal_filter', IFNULL(p_canal_filter, 'AMBOS_CANALES'),
-      'modo_ejecucion', p_modo_ejecucion,
-      'gestiones_bot', v_gestiones_bot,
-      'gestiones_humano', v_gestiones_humano
-    ),
-    'INICIADO',
-    CONCAT('Canales detectados: ', v_canales_detectados)
-  );
+  timestamp,
+  stage_name,
+  fecha_proceso,
+  status,
+  records_processed,
+  duration_seconds,
+  message,
+  execution_parameters
+)
+VALUES (
+  CURRENT_TIMESTAMP(),                          -- timestamp
+  'stage_gestiones',                            -- stage_name
+  p_fecha_proceso,                              -- fecha_proceso
+  'INICIADO',                                   -- status
+  0,                                            -- records_processed (puedes ajustar más adelante)
+  0.0,                                          -- duration_seconds (puedes actualizar al final del stage)
+  CONCAT('Canales detectados: ', v_canales_detectados),  -- mensaje descriptivo
+  JSON_OBJECT(                                  -- execution_parameters
+    'fecha_proceso', CAST(p_fecha_proceso AS STRING),
+    'canal_filter', IFNULL(p_canal_filter, 'AMBOS_CANALES'),
+    'modo_ejecucion', p_modo_ejecucion,
+    'gestiones_bot', v_gestiones_bot,
+    'gestiones_humano', v_gestiones_humano
+  )
+);
   
   -- ================================================================
   -- MERGE/UPSERT: Datos de gestiones unificadas
@@ -98,34 +107,39 @@ BEGIN
         ) AS secuencia_gestion,
         
         -- 👥 DIMENSIONES DE OPERADOR
-        bot.agent AS nombre_agente_original,
-        COALESCE(bot.agent, 'BOT_AUTOMATICO') AS operador_final,
+        "VOICEBOT" AS nombre_agente_original,
+        COALESCE("VOICEBOT", 'BOT_AUTOMATICO') AS operador_final,
         
         -- 📞 DIMENSIONES ORIGINALES
         bot.management AS management_original,
         bot.sub_management AS sub_management_original,
-        bot.compromise AS compromiso_original,
+        bot.compromiso AS compromiso_original,
         
         -- 🎯 RESPUESTAS HOMOLOGADAS (simplificadas para BOT)
         CASE
-          WHEN bot.compromise IS NOT NULL THEN 'COMPROMISO'
-          WHEN bot.management IS NOT NULL THEN 'CONTACTO'
+          WHEN bot.compromiso IS NOT NULL AND bot.compromiso != '' THEN 'COMPROMISO'
+          WHEN bot.management IS NOT NULL AND bot.management != '' THEN 'CONTACTO'
           ELSE 'GESTION'
         END AS grupo_respuesta,
         
         COALESCE(bot.management, 'SIN_MANAGEMENT') AS nivel_1,
         COALESCE(bot.sub_management, 'SIN_SUB_MANAGEMENT') AS nivel_2,
         
-        -- 💰 COMPROMISOS
-        CASE WHEN bot.compromise IS NOT NULL THEN TRUE ELSE FALSE END AS es_compromiso,
-        SAFE_CAST(bot.compromise AS FLOAT64) AS monto_compromiso,
-        SAFE.PARSE_DATE('%Y-%m-%d', bot.compromise) AS fecha_compromiso,
+        -- 💰 COMPROMISOS (CORREGIDO)
+        CASE WHEN bot.compromiso IS NOT NULL AND bot.compromiso != '' THEN TRUE ELSE FALSE END AS es_compromiso,
+        SAFE_CAST(bot.compromiso AS FLOAT64) AS monto_compromiso,
+        -- CORREGIDO: Usar fecha_compromiso directamente y convertir a DATE
+        CASE 
+          WHEN bot.fecha_compromiso IS NOT NULL 
+          THEN DATE(bot.fecha_compromiso)
+          ELSE NULL 
+        END AS fecha_compromiso,
         
         -- 🏆 PESO ORIGINAL
         bot.weight AS weight_original,
         
         -- 📊 FLAGS BÁSICOS
-        CASE WHEN bot.management IS NOT NULL THEN TRUE ELSE FALSE END AS es_contacto_efectivo,
+        CASE WHEN bot.management IS NOT NULL AND bot.management != '' THEN TRUE ELSE FALSE END AS es_contacto_efectivo,
         
         -- 🕒 METADATOS
         bot.date AS timestamp_gestion
@@ -153,34 +167,34 @@ BEGIN
         ) AS secuencia_gestion,
         
         -- 👥 DIMENSIONES DE OPERADOR
-        humano.agent AS nombre_agente_original,
-        COALESCE(humano.agent, 'AGENTE_HUMANO') AS operador_final,
+        humano.nombre_agente AS nombre_agente_original,
+        COALESCE(humano.nombre_agente, 'AGENTE_HUMANO') AS operador_final,
         
-        -- 📞 DIMENSIONES ORIGINALES
-        humano.management AS management_original,
-        humano.sub_management AS sub_management_original,
-        humano.compromise AS compromiso_original,
+        -- 📞 DIMENSIONES ORIGINALES (CORREGIDO)
+        humano.management AS management_original,  -- Este campo existe en el esquema
+        humano.sub_management AS sub_management_original,  -- Este campo existe en el esquema
+        humano.n3 AS compromiso_original,  -- CORREGIDO: era N3, ahora n3
         
-        -- 🎯 RESPUESTAS HOMOLOGADAS (simplificadas para HUMANO)
+        -- 🎯 RESPUESTAS HOMOLOGADAS (CORREGIDO)
         CASE
-          WHEN humano.compromise IS NOT NULL THEN 'COMPROMISO'
-          WHEN humano.management IS NOT NULL THEN 'CONTACTO'
+          WHEN humano.monto_compromiso IS NOT NULL AND humano.monto_compromiso > 0 THEN 'COMPROMISO'
+          WHEN humano.management IS NOT NULL AND humano.management != '' THEN 'CONTACTO'
           ELSE 'GESTION'
         END AS grupo_respuesta,
         
         COALESCE(humano.management, 'SIN_MANAGEMENT') AS nivel_1,
         COALESCE(humano.sub_management, 'SIN_SUB_MANAGEMENT') AS nivel_2,
         
-        -- 💰 COMPROMISOS
-        CASE WHEN humano.compromise IS NOT NULL THEN TRUE ELSE FALSE END AS es_compromiso,
-        SAFE_CAST(humano.compromise AS FLOAT64) AS monto_compromiso,
-        SAFE.PARSE_DATE('%Y-%m-%d', humano.compromise) AS fecha_compromiso,
+        -- 💰 COMPROMISOS (CORREGIDO)
+        CASE WHEN humano.monto_compromiso IS NOT NULL AND humano.monto_compromiso > 0 THEN TRUE ELSE FALSE END AS es_compromiso,
+        humano.monto_compromiso AS monto_compromiso,  -- CORREGIDO: era compromise
+        humano.fecha_compromiso AS fecha_compromiso,  -- Ya es DATE en el esquema
         
         -- 🏆 PESO ORIGINAL
         humano.weight AS weight_original,
         
         -- 📊 FLAGS BÁSICOS
-        CASE WHEN humano.management IS NOT NULL THEN TRUE ELSE FALSE END AS es_contacto_efectivo,
+        CASE WHEN humano.management IS NOT NULL AND humano.management != '' THEN TRUE ELSE FALSE END AS es_contacto_efectivo,
         
         -- 🕒 METADATOS
         humano.date AS timestamp_gestion
@@ -429,7 +443,7 @@ BEGIN
     source.contactos_efectivos_mes_canal, source.monto_compromisos_mes_canal,
     source.tasa_efectividad_canal_mes, source.ranking_cliente_canal_mes,
     source.dias_gestionado_canal_mes, source.dia_semana, source.semana_mes,
-    source.es_fin_semana, source.timestamp_gestion, source.fecha_actualizacion,
+    source.es_fin_semana, TIMESTAMP(source.timestamp_gestion), source.fecha_actualizacion,
     source.fecha_proceso, source.fecha_carga
   );
   
@@ -440,36 +454,47 @@ BEGIN
   SET v_registros_procesados = @@row_count;
   
   -- Obtener estadísticas detalladas
-  SELECT COUNT(*) INTO v_registros_nuevos
-  FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones`
-  WHERE fecha_carga = v_inicio_proceso;
-  
+  SET v_registros_nuevos = (
+    SELECT COUNT(*)
+    FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones`
+    WHERE fecha_carga = v_inicio_proceso
+  );
+
   SET v_registros_actualizados = v_registros_procesados - v_registros_nuevos;
   
-  -- Log final con métricas de negocio
+  -- Log final con métricas de negocio (ESTRUCTURA UNIFICADA)
+  -- ================================================================
   INSERT INTO `BI_USA.pipeline_logs` (
-    proceso, 
-    etapa, 
-    fecha_inicio,
-    fecha_fin,
-    registros_procesados,
-    registros_nuevos,
-    registros_actualizados,
-    estado,
-    observaciones
-  ) 
-  VALUES (
-    'faco_pipeline', 
-    'stage_gestiones', 
-    v_inicio_proceso,
-    CURRENT_TIMESTAMP(),
-    v_registros_procesados,
-    v_registros_nuevos,
-    v_registros_actualizados,
-    'COMPLETADO',
-    CONCAT('Proceso completado. Canales: ', v_canales_detectados, 
-           '. Enfoque: mejor gestión por canal separado')
-  );
+  timestamp,
+  stage_name,
+  fecha_proceso,
+  status,
+  records_processed,
+  message,
+  execution_parameters
+)
+VALUES (
+  CURRENT_TIMESTAMP(),
+  'stage_gestiones',
+  CURRENT_DATE("America/Lima"),
+  'COMPLETADO',
+  v_registros_procesados,
+  CONCAT(
+    'Proceso completado. Canales: ', v_canales_detectados,
+    '. Enfoque: mejor gestión por canal separado. ',
+    'Duración: ', CAST(DATETIME_DIFF(CURRENT_TIMESTAMP(), v_inicio_proceso, SECOND) AS STRING), 's'
+  ),
+  JSON_OBJECT(
+    'fecha_proceso', CAST(p_fecha_proceso AS STRING),
+    'canal_filter', IFNULL(p_canal_filter, 'AMBOS_CANALES'),
+    'modo_ejecucion', p_modo_ejecucion,
+    'gestiones_bot', v_gestiones_bot,
+    'gestiones_humano', v_gestiones_humano
+  )
+);
+
+
+  
   
   -- ================================================================
   -- RESUMEN DE NEGOCIO POR CANAL

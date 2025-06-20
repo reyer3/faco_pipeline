@@ -69,7 +69,7 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_asignacion` (
 )
 
 -- 🔍 CONFIGURACIÓN DE PARTICIONADO Y CLUSTERING
-PARTITION BY DATE(fecha_asignacion)
+PARTITION BY fecha_asignacion
 CLUSTER BY cod_luna, tipo_cartera, segmento_gestion
 
 -- 📋 OPCIONES DE TABLA

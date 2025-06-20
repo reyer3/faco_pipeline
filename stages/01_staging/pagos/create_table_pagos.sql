@@ -88,7 +88,7 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_pagos` (
 )
 
 -- 🔍 CONFIGURACIÓN DE PARTICIONADO Y CLUSTERING
-PARTITION BY DATE(fecha_pago)
+PARTITION BY fecha_pago
 CLUSTER BY cod_luna, cartera, es_pago_con_pdp
 
 -- 📋 OPCIONES DE TABLA
