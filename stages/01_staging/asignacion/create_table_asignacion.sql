@@ -2,8 +2,8 @@
 -- TABLA: Stage de Asignación - Pipeline de Cobranzas
 -- ================================================================
 -- Autor: FACO Team
--- Fecha: 2025-06-19
--- Versión: 1.0.0
+-- Fecha: 2025-06-20
+-- Versión: 1.1.0 - CORREGIDA particionado
 -- Descripción: Tabla staging para datos de asignación de cartera
 -- ================================================================
 
