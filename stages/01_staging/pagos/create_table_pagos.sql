@@ -2,8 +2,8 @@
 -- TABLA: Stage de Pagos - Pipeline de Cobranzas
 -- ================================================================
 -- Autor: FACO Team
--- Fecha: 2025-06-19
--- Versión: 1.0.0
+-- Fecha: 2025-06-20
+-- Versión: 1.1.0 - CORREGIDA para BigQuery
 -- Descripción: Tabla staging para pagos con atribución de gestiones
 --              y análisis de efectividad
 -- ================================================================
@@ -39,10 +39,10 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_pagos` (
   -- 🎯 ATRIBUCIÓN DE GESTIÓN
   fecha_gestion_atribuida DATE
     OPTIONS(description="Fecha de la gestión atribuida al pago"),
-  canal_atribuido STRING NOT NULL DEFAULT 'SIN_GESTION_PREVIA'
-    OPTIONS(description="Canal de la gestión atribuida"),
-  operador_atribuido STRING NOT NULL DEFAULT 'SIN_GESTION_PREVIA'
-    OPTIONS(description="Operador de la gestión atribuida"),
+  canal_atribuido STRING
+    OPTIONS(description="Canal de la gestión atribuida - DEFAULT: SIN_GESTION_PREVIA"),
+  operador_atribuido STRING
+    OPTIONS(description="Operador de la gestión atribuida - DEFAULT: SIN_GESTION_PREVIA"),
   
   -- 📅 DATOS DE COMPROMISO (PDP)
   fecha_compromiso DATE
@@ -51,22 +51,22 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_pagos` (
     OPTIONS(description="Monto comprometido"),
   
   -- 🏷️ FLAGS DE ANÁLISIS
-  es_pago_con_pdp BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si el pago tiene promesa de pago asociada"),
-  pdp_estaba_vigente BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si PDP estaba vigente al momento del pago"),
-  pago_es_puntual BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si pago coincide exactamente con fecha compromiso"),
-  tiene_gestion_previa BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si hay gestión atribuible"),
+  es_pago_con_pdp BOOLEAN
+    OPTIONS(description="TRUE si el pago tiene promesa de pago asociada - DEFAULT: FALSE"),
+  pdp_estaba_vigente BOOLEAN
+    OPTIONS(description="TRUE si PDP estaba vigente al momento del pago - DEFAULT: FALSE"),
+  pago_es_puntual BOOLEAN
+    OPTIONS(description="TRUE si pago coincide exactamente con fecha compromiso - DEFAULT: FALSE"),
+  tiene_gestion_previa BOOLEAN
+    OPTIONS(description="TRUE si hay gestión atribuible - DEFAULT: FALSE"),
   
   -- 📊 MÉTRICAS DE TIEMPO
   dias_entre_gestion_y_pago INT64
     OPTIONS(description="Días transcurridos entre gestión y pago"),
   
   -- 🎯 SCORE DE EFECTIVIDAD
-  efectividad_atribucion FLOAT64 NOT NULL DEFAULT 0.0
-    OPTIONS(description="Score de efectividad de atribución (0.0-1.0)"),
+  efectividad_atribucion FLOAT64
+    OPTIONS(description="Score de efectividad de atribución (0.0-1.0) - DEFAULT: 0.0"),
   
   -- 📈 CLASIFICACIÓN DE PAGO
   tipo_pago STRING NOT NULL
@@ -88,7 +88,7 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_pagos` (
 )
 
 -- 🔍 CONFIGURACIÓN DE PARTICIONADO Y CLUSTERING
-PARTITION BY DATE(fecha_pago)
+PARTITION BY fecha_pago
 CLUSTER BY cartera, tipo_pago, categoria_efectividad
 
 -- 📋 OPCIONES DE TABLA
@@ -109,6 +109,19 @@ OPTIONS(
 -- CHECK: monto_pagado > 0
 -- CHECK: tipo_pago IN ('PUNTUAL', 'TARDIO_PDP', 'POST_GESTION', 'ESPONTANEO')
 -- CHECK: categoria_efectividad IN ('ALTA', 'MEDIA', 'BAJA', 'SIN_ATRIBUCION')
+
+-- ================================================================
+-- VALORES DEFAULT MANEJADOS EN STORED PROCEDURES
+-- ================================================================
+
+-- NOTA: Los valores DEFAULT se manejan en los stored procedures:
+-- - canal_atribuido: 'SIN_GESTION_PREVIA' si es NULL
+-- - operador_atribuido: 'SIN_GESTION_PREVIA' si es NULL
+-- - es_pago_con_pdp: FALSE si es NULL
+-- - pdp_estaba_vigente: FALSE si es NULL
+-- - pago_es_puntual: FALSE si es NULL
+-- - tiene_gestion_previa: FALSE si es NULL
+-- - efectividad_atribucion: 0.0 si es NULL
 
 -- ================================================================
 -- COMENTARIOS DE NEGOCIO
