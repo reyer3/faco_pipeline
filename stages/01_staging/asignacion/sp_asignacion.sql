@@ -3,7 +3,7 @@
 -- ================================================================
 -- Autor: FACO Team
 -- Fecha: 2025-06-20
--- Versión: 1.2.0 - CORREGIDA para BigQuery
+-- Versión: 1.3.0 - CORREGIDA sintaxis SELECT INTO
 -- Descripción: Procesamiento y transformación de datos de asignación
 --              con detección automática de archivos por fecha
 -- ================================================================
@@ -37,10 +37,11 @@ BEGIN
   
   -- Si no se especifica archivo, detectar automáticamente por fecha
   IF p_archivo_filter IS NULL THEN
-    SELECT STRING_AGG(ARCHIVO, ', ') 
-    INTO v_archivos_detectados
-    FROM `mibot-222814.BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_dash_calendario_v5`
-    WHERE FECHA_ASIGNACION = p_fecha_proceso;
+    SET v_archivos_detectados = (
+      SELECT STRING_AGG(ARCHIVO, ', ') 
+      FROM `mibot-222814.BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_dash_calendario_v5`
+      WHERE FECHA_ASIGNACION = p_fecha_proceso
+    );
     
     -- Si no hay archivos para la fecha, usar modo general
     IF v_archivos_detectados IS NULL OR v_archivos_detectados = '' THEN
@@ -209,9 +210,11 @@ BEGIN
   SET v_registros_procesados = @@row_count;
   
   -- Obtener estadísticas detalladas
-  SELECT COUNT(*) INTO v_registros_nuevos
-  FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_asignacion`
-  WHERE fecha_carga = v_inicio_proceso;
+  SET v_registros_nuevos = (
+    SELECT COUNT(*) 
+    FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_asignacion`
+    WHERE fecha_carga = v_inicio_proceso
+  );
   
   SET v_registros_actualizados = v_registros_procesados - v_registros_nuevos;
   
