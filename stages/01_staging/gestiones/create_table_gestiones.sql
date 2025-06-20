@@ -3,16 +3,18 @@
 -- ================================================================
 -- Autor: FACO Team
 -- Fecha: 2025-06-19
--- Versión: 1.1.0
+-- Versión: 1.2.0
 -- Descripción: Tabla staging para gestiones unificadas BOT + HUMANO
---              con contexto de cartera, archivo y cíclicas de vencimiento
+--              con cálculo de peso por gestión y ranking mensual por cliente
 -- ================================================================
 
 CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones` (
   
-  -- 🔑 LLAVES PRIMARIAS
+  -- 🔑 LLAVES PRIMARIAS (COMPUESTA PARA MÚLTIPLES CARTERAS)
   cod_luna INT64 NOT NULL
     OPTIONS(description="Código único del cliente en sistema Luna"),
+  archivo_cartera STRING NOT NULL
+    OPTIONS(description="Nombre del archivo de cartera de donde viene el cliente"),
   fecha_gestion DATE NOT NULL
     OPTIONS(description="Fecha de la gestión"),
   canal_origen STRING NOT NULL
@@ -51,8 +53,6 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones` (
     OPTIONS(description="Fecha comprometida para el pago"),
   
   -- 🔥 NUEVO: CONTEXTO DE CARTERA Y ARCHIVO
-  archivo_cartera STRING NOT NULL
-    OPTIONS(description="Nombre del archivo de cartera de donde viene el cliente"),
   tipo_cartera STRING NOT NULL
     OPTIONS(description="Tipo de cartera: TEMPRANA, CUOTA_FRACCIONAMIENTO, ALTAS_NUEVAS, OTRAS"),
   
@@ -86,6 +86,34 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones` (
   tipo_medibilidad STRING NOT NULL
     OPTIONS(description="Tipo de medibilidad: ASIGNACION_Y_DEUDA, SOLO_ASIGNACION, SOLO_DEUDA, NO_MEDIBLE"),
   
+  -- 🏆 NUEVO: SISTEMA DE PESO Y RANKING POR CLIENTE
+  peso_gestion FLOAT64 NOT NULL DEFAULT 0.0
+    OPTIONS(description="Peso calculado de la gestión: Compromiso=3, Contacto Efectivo=2, Gestión=1"),
+  es_mejor_gestion_dia BOOLEAN NOT NULL DEFAULT FALSE
+    OPTIONS(description="TRUE si es la gestión de mayor peso del día para el cliente+cartera"),
+  peso_acumulado_mes FLOAT64 NOT NULL DEFAULT 0.0
+    OPTIONS(description="Suma del peso de las mejores gestiones del mes para cliente+cartera"),
+  ranking_cliente_mes INT64 DEFAULT NULL
+    OPTIONS(description="Posición del cliente en ranking mensual por peso acumulado"),
+  
+  -- 📈 NUEVO: MÉTRICAS DE PERFORMANCE CLIENTE
+  gestiones_mes_cliente INT64 NOT NULL DEFAULT 0
+    OPTIONS(description="Total de gestiones en el mes para cliente+cartera"),
+  compromisos_mes_cliente INT64 NOT NULL DEFAULT 0
+    OPTIONS(description="Total compromisos en el mes para cliente+cartera"),
+  contactos_efectivos_mes_cliente INT64 NOT NULL DEFAULT 0
+    OPTIONS(description="Total contactos efectivos en el mes para cliente+cartera"),
+  monto_compromisos_mes_cliente FLOAT64 NOT NULL DEFAULT 0.0
+    OPTIONS(description="Suma de montos comprometidos en el mes para cliente+cartera"),
+  
+  -- 🎯 NUEVO: INDICADORES DE CALIDAD
+  tasa_efectividad_cliente_mes FLOAT64 DEFAULT NULL
+    OPTIONS(description="% de efectividad del cliente en el mes (contactos+compromisos/total)"),
+  es_cliente_top_mes BOOLEAN NOT NULL DEFAULT FALSE
+    OPTIONS(description="TRUE si está en el top 10% de clientes del mes por peso"),
+  dias_gestionado_mes INT64 NOT NULL DEFAULT 0
+    OPTIONS(description="Cantidad de días que fue gestionado en el mes"),
+  
   -- 📅 DIMENSIONES TEMPORALES CALCULADAS
   dia_semana STRING
     OPTIONS(description="Día de la semana de la gestión"),
@@ -107,11 +135,11 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones` (
 
 -- 🔍 CONFIGURACIÓN DE PARTICIONADO Y CLUSTERING
 PARTITION BY DATE(fecha_gestion)
-CLUSTER BY cod_luna, canal_origen, archivo_cartera, ciclica_vencimiento
+CLUSTER BY cod_luna, archivo_cartera, es_mejor_gestion_dia, peso_gestion
 
 -- 📋 OPCIONES DE TABLA
 OPTIONS(
-  description="Tabla staging para gestiones unificadas BOT + HUMANO. Incluye contexto completo de cartera, archivo y cíclicas de vencimiento para análisis de efectividad por segmento.",
+  description="Tabla staging para gestiones unificadas con sistema de peso y ranking por cliente. Calcula la mejor gestión del día y mantiene acumulados mensuales considerando que un cliente puede estar en múltiples carteras.",
   labels=[("ambiente", "produccion"), ("pipeline", "faco_cobranzas"), ("capa", "staging")]
 );
 
@@ -120,47 +148,44 @@ OPTIONS(
 -- ================================================================
 
 -- BigQuery no soporta constraints explícitos, pero documentamos las reglas:
--- PRIMARY KEY: (cod_luna, fecha_gestion, canal_origen, secuencia_gestion)
+-- PRIMARY KEY: (cod_luna, archivo_cartera, fecha_gestion, canal_origen, secuencia_gestion)
 -- FOREIGN KEY: cod_luna -> asignacion.cod_luna (opcional)
 -- CHECK: canal_origen IN ('BOT', 'HUMANO')
--- CHECK: tipo_cartera IN ('TEMPRANA', 'CUOTA_FRACCIONAMIENTO', 'ALTAS_NUEVAS', 'OTRAS')
--- CHECK: tipo_medibilidad IN ('ASIGNACION_Y_DEUDA', 'SOLO_ASIGNACION', 'SOLO_DEUDA', 'NO_MEDIBLE')
--- CHECK: monto_compromiso >= 0
+-- CHECK: peso_gestion >= 0
+-- CHECK: peso_acumulado_mes >= 0
+-- CHECK: tasa_efectividad_cliente_mes BETWEEN 0 AND 1
+-- INDEX: (cod_luna, archivo_cartera, fecha_gestion) para cálculos de mejor gestión día
+-- INDEX: (cod_luna, archivo_cartera, EXTRACT(YEAR_MONTH FROM fecha_gestion)) para cálculos mensuales
 
 -- ================================================================
--- COMENTARIOS DE NEGOCIO IMPORTANTES
+-- LÓGICA DE NEGOCIO - SISTEMA DE PESO
 -- ================================================================
 
--- Esta tabla unifica gestiones de ambos canales (BOT + HUMANO) y los enriquece con:
+-- CÁLCULO DE PESO POR GESTIÓN:
+-- - Compromiso (es_compromiso = TRUE): peso = 3.0
+-- - Contacto Efectivo (es_contacto_efectivo = TRUE): peso = 2.0  
+-- - Gestión Simple: peso = 1.0
+-- - Si es compromiso Y contacto efectivo: peso = 3.0 (prevalece compromiso)
 --
--- 1. CONTEXTO DE CARTERA:
---    - archivo_cartera: Nombre del archivo de donde viene el cliente
---    - tipo_cartera: Tipificación automática de la cartera
---    - segmento_gestion: Segmento asignado al cliente
+-- MEJOR GESTIÓN DEL DÍA:
+-- - Para cada (cod_luna, archivo_cartera, fecha_gestion)
+-- - Se marca es_mejor_gestion_dia = TRUE la de mayor peso
+-- - En caso de empate: prevalece la de mayor monto_compromiso
+-- - En caso de empate: prevalece la primera por timestamp_gestion
 --
--- 2. INFORMACIÓN DE CÍCLICAS:
---    - fecha_vencimiento_cliente: Vencimiento desde asignación/deudas
---    - categoria_vencimiento: Categorización del estado de vencimiento
---    - ciclica_vencimiento: Cíclica derivada del día de vencimiento (ej: CICLICA_15)
---    
---    La cíclica es CRÍTICA porque nos dice el ciclo de facturación del cliente,
---    lo cual determina patrones de pago y estrategias de gestión específicas.
+-- CÁLCULOS MENSUALES:
+-- - peso_acumulado_mes: suma de peso_gestion donde es_mejor_gestion_dia = TRUE
+-- - gestiones_mes_cliente: count(*) para el mes 
+-- - compromisos_mes_cliente: count donde es_compromiso = TRUE
+-- - contactos_efectivos_mes_cliente: count donde es_contacto_efectivo = TRUE
+-- - tasa_efectividad_cliente_mes: (contactos + compromisos) / total_gestiones
 --
--- 3. MEDIBILIDAD DE GESTIONES:
---    - Una gestión es medible si el cliente tiene asignación O deuda
---    - tipo_medibilidad indica específicamente qué tipo de relación tiene
---    - Permite análisis de efectividad por tipo de cliente
+-- RANKING MENSUAL:
+-- - ranking_cliente_mes: ROW_NUMBER() OVER (ORDER BY peso_acumulado_mes DESC)
+-- - es_cliente_top_mes: TRUE si ranking <= PERCENTILE_90
 --
--- 4. HOMOLOGACIÓN DE RESPUESTAS:
---    - Unifica las respuestas de BOT y HUMANO bajo una taxonomía común
---    - Permite análisis comparativo entre canales
---    - Facilita reportería consolidada
---
--- 5. ANÁLISIS TEMPORAL:
---    - Considera patrones por día de semana, fin de semana
---    - Permite análisis de efectividad por horarios y días
---
--- REGLAS DE MERGE:
--- - Se actualizan campos calculados y de contexto de cartera
--- - Se preserva el histórico de gestiones
--- - Se mantiene la secuencia de gestiones por día y canal
+-- CONSIDERACIONES LLAVE COMPUESTA:
+-- - Un cliente puede estar en múltiples carteras (archivo_cartera) en el mismo mes
+-- - Cada combinación (cod_luna, archivo_cartera) se trata independientemente
+-- - Los cálculos mensuales son por combinación cliente+cartera
+-- - Esto permite analizar efectividad del cliente por tipo de cartera
