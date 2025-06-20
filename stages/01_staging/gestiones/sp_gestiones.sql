@@ -3,9 +3,9 @@
 -- ================================================================
 -- Autor: FACO Team
 -- Fecha: 2025-06-19
--- Versión: 1.1.0
+-- Versión: 1.3.0
 -- Descripción: Procesamiento de gestiones unificadas BOT + HUMANO
---              con contexto de cartera y información de cíclicas
+--              con marcadores de mejor gestión por canal separado
 -- ================================================================
 
 CREATE OR REPLACE PROCEDURE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_gestiones`(
@@ -65,7 +65,7 @@ BEGIN
     v_inicio_proceso,
     JSON_OBJECT(
       'fecha_proceso', CAST(p_fecha_proceso AS STRING),
-      'canal_filter', IFNULL(p_canal_filter, 'TODOS'),
+      'canal_filter', IFNULL(p_canal_filter, 'AMBOS_CANALES'),
       'modo_ejecucion', p_modo_ejecucion,
       'gestiones_bot', v_gestiones_bot,
       'gestiones_humano', v_gestiones_humano
@@ -75,278 +75,361 @@ BEGIN
   );
   
   -- ================================================================
-  -- MERGE/UPSERT: Gestiones unificadas con contexto de cartera
+  -- MERGE/UPSERT: Datos de gestiones unificadas
   -- ================================================================
   
   MERGE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones` AS target
   USING (
     
-    WITH gestiones_bot AS (
-      SELECT 
-        SAFE_CAST(document AS INT64) AS cod_luna,
-        DATE(date) AS fecha_gestion,
-        COALESCE(management, 'SIN_MANAGEMENT') AS management_original,
-        '' AS sub_management_original,
-        COALESCE(compromiso, '') AS compromiso_original,
-        'SISTEMA_BOT' AS nombre_agente_original,
-        CAST(0 AS FLOAT64) AS monto_compromiso,
-        CAST(NULL AS DATE) AS fecha_compromiso,
+    WITH gestiones_unificadas AS (
+      -- ================================
+      -- UNIÓN DE GESTIONES BOT + HUMANO
+      -- ================================
+      
+      SELECT
+        -- 🔑 LLAVES PRIMARIAS
+        SAFE_CAST(bot.document AS INT64) AS cod_luna,
+        COALESCE(cal.ARCHIVO, 'SIN_CARTERA') AS archivo_cartera,
+        DATE(bot.date) AS fecha_gestion,
         'BOT' AS canal_origen,
-        date as timestamp_gestion
-      FROM `mibot-222814.BI_USA.voicebot_P3fV4dWNeMkN5RJMhV8e`
-      WHERE SAFE_CAST(document AS INT64) IS NOT NULL
-        AND DATE(date) = p_fecha_proceso
-        AND DATE(date) >= '2025-01-01' -- Filtrar fechas erróneas
-        AND (p_canal_filter IS NULL OR p_canal_filter = 'BOT')
-        AND (p_modo_ejecucion = 'FULL' OR DATE(date) >= p_fecha_proceso)
-    ),
-    
-    gestiones_humano AS (
-      SELECT 
-        SAFE_CAST(document AS INT64) AS cod_luna,
-        DATE(date) AS fecha_gestion,
-        COALESCE(management, 'SIN_MANAGEMENT') AS management_original,
-        '' AS sub_management_original,
-        '' AS compromiso_original,
-        COALESCE(nombre_agente, 'SIN_AGENTE') AS nombre_agente_original,
-        CAST(COALESCE(monto_compromiso, 0) AS FLOAT64) AS monto_compromiso,
-        CAST(fecha_compromiso AS DATE) AS fecha_compromiso,
-        'HUMANO' AS canal_origen,
-        date as timestamp_gestion
-      FROM `mibot-222814.BI_USA.mibotair_P3fV4dWNeMkN5RJMhV8e`
-      WHERE SAFE_CAST(document AS INT64) IS NOT NULL
-        AND DATE(date) = p_fecha_proceso
-        AND (p_canal_filter IS NULL OR p_canal_filter = 'HUMANO')
-        AND (p_modo_ejecucion = 'FULL' OR DATE(date) >= p_fecha_proceso)
-    ),
-    
-    gestiones_unificadas AS (
-      SELECT * FROM gestiones_bot
+        ROW_NUMBER() OVER (
+          PARTITION BY SAFE_CAST(bot.document AS INT64), DATE(bot.date) 
+          ORDER BY bot.date
+        ) AS secuencia_gestion,
+        
+        -- 👥 DIMENSIONES DE OPERADOR
+        bot.agent AS nombre_agente_original,
+        COALESCE(bot.agent, 'BOT_AUTOMATICO') AS operador_final,
+        
+        -- 📞 DIMENSIONES ORIGINALES
+        bot.management AS management_original,
+        bot.sub_management AS sub_management_original,
+        bot.compromise AS compromiso_original,
+        
+        -- 🎯 RESPUESTAS HOMOLOGADAS (simplificadas para BOT)
+        CASE
+          WHEN bot.compromise IS NOT NULL THEN 'COMPROMISO'
+          WHEN bot.management IS NOT NULL THEN 'CONTACTO'
+          ELSE 'GESTION'
+        END AS grupo_respuesta,
+        
+        COALESCE(bot.management, 'SIN_MANAGEMENT') AS nivel_1,
+        COALESCE(bot.sub_management, 'SIN_SUB_MANAGEMENT') AS nivel_2,
+        
+        -- 💰 COMPROMISOS
+        CASE WHEN bot.compromise IS NOT NULL THEN TRUE ELSE FALSE END AS es_compromiso,
+        SAFE_CAST(bot.compromise AS FLOAT64) AS monto_compromiso,
+        SAFE.PARSE_DATE('%Y-%m-%d', bot.compromise) AS fecha_compromiso,
+        
+        -- 🏆 PESO ORIGINAL
+        bot.weight AS weight_original,
+        
+        -- 📊 FLAGS BÁSICOS
+        CASE WHEN bot.management IS NOT NULL THEN TRUE ELSE FALSE END AS es_contacto_efectivo,
+        
+        -- 🕒 METADATOS
+        bot.date AS timestamp_gestion
+        
+      FROM `mibot-222814.BI_USA.voicebot_P3fV4dWNeMkN5RJMhV8e` AS bot
+      LEFT JOIN `mibot-222814.BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_dash_calendario_v5` AS cal
+        ON DATE(bot.date) = cal.FECHA_ASIGNACION
+      WHERE 
+        (p_canal_filter IS NULL OR p_canal_filter = 'BOT')
+        AND DATE(bot.date) = p_fecha_proceso
+        AND SAFE_CAST(bot.document AS INT64) IS NOT NULL
+        AND (p_modo_ejecucion = 'FULL' OR DATE(bot.date) >= p_fecha_proceso)
+      
       UNION ALL
-      SELECT * FROM gestiones_humano
+      
+      SELECT
+        -- 🔑 LLAVES PRIMARIAS
+        SAFE_CAST(humano.document AS INT64) AS cod_luna,
+        COALESCE(cal.ARCHIVO, 'SIN_CARTERA') AS archivo_cartera,
+        DATE(humano.date) AS fecha_gestion,
+        'HUMANO' AS canal_origen,
+        ROW_NUMBER() OVER (
+          PARTITION BY SAFE_CAST(humano.document AS INT64), DATE(humano.date) 
+          ORDER BY humano.date
+        ) AS secuencia_gestion,
+        
+        -- 👥 DIMENSIONES DE OPERADOR
+        humano.agent AS nombre_agente_original,
+        COALESCE(humano.agent, 'AGENTE_HUMANO') AS operador_final,
+        
+        -- 📞 DIMENSIONES ORIGINALES
+        humano.management AS management_original,
+        humano.sub_management AS sub_management_original,
+        humano.compromise AS compromiso_original,
+        
+        -- 🎯 RESPUESTAS HOMOLOGADAS (simplificadas para HUMANO)
+        CASE
+          WHEN humano.compromise IS NOT NULL THEN 'COMPROMISO'
+          WHEN humano.management IS NOT NULL THEN 'CONTACTO'
+          ELSE 'GESTION'
+        END AS grupo_respuesta,
+        
+        COALESCE(humano.management, 'SIN_MANAGEMENT') AS nivel_1,
+        COALESCE(humano.sub_management, 'SIN_SUB_MANAGEMENT') AS nivel_2,
+        
+        -- 💰 COMPROMISOS
+        CASE WHEN humano.compromise IS NOT NULL THEN TRUE ELSE FALSE END AS es_compromiso,
+        SAFE_CAST(humano.compromise AS FLOAT64) AS monto_compromiso,
+        SAFE.PARSE_DATE('%Y-%m-%d', humano.compromise) AS fecha_compromiso,
+        
+        -- 🏆 PESO ORIGINAL
+        humano.weight AS weight_original,
+        
+        -- 📊 FLAGS BÁSICOS
+        CASE WHEN humano.management IS NOT NULL THEN TRUE ELSE FALSE END AS es_contacto_efectivo,
+        
+        -- 🕒 METADATOS
+        humano.date AS timestamp_gestion
+        
+      FROM `mibot-222814.BI_USA.mibotair_P3fV4dWNeMkN5RJMhV8e` AS humano
+      LEFT JOIN `mibot-222814.BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_dash_calendario_v5` AS cal
+        ON DATE(humano.date) = cal.FECHA_ASIGNACION
+      WHERE 
+        (p_canal_filter IS NULL OR p_canal_filter = 'HUMANO')
+        AND DATE(humano.date) = p_fecha_proceso
+        AND SAFE_CAST(humano.document AS INT64) IS NOT NULL
+        AND (p_modo_ejecucion = 'FULL' OR DATE(humano.date) >= p_fecha_proceso)
     ),
     
     gestiones_enriquecidas AS (
       SELECT
         -- 🔑 LLAVES PRIMARIAS
-        g.cod_luna,
-        g.fecha_gestion,
-        g.canal_origen,
-        ROW_NUMBER() OVER (
-          PARTITION BY g.cod_luna, g.fecha_gestion, g.canal_origen 
-          ORDER BY g.timestamp_gestion
-        ) AS secuencia_gestion,
+        gest.cod_luna,
+        gest.archivo_cartera,
+        gest.fecha_gestion,
+        gest.canal_origen,
+        gest.secuencia_gestion,
         
         -- 👥 DIMENSIONES DE OPERADOR
-        g.nombre_agente_original,
-        CASE 
-          WHEN g.canal_origen = 'BOT' THEN 'SISTEMA_BOT'
-          WHEN g.canal_origen = 'HUMANO' THEN COALESCE(h_user.usuario, g.nombre_agente_original, 'SIN_AGENTE')
-          ELSE 'NO_IDENTIFICADO'
-        END AS operador_final,
+        gest.nombre_agente_original,
+        gest.operador_final,
         
-        -- 📞 DIMENSIONES DE GESTIÓN ORIGINALES
-        g.management_original,
-        g.sub_management_original,
-        g.compromiso_original,
+        -- 📞 DIMENSIONES ORIGINALES
+        gest.management_original,
+        gest.sub_management_original,
+        gest.compromiso_original,
         
         -- 🎯 RESPUESTAS HOMOLOGADAS
-        COALESCE(
-          CASE
-            WHEN g.canal_origen = 'BOT' THEN h_bot.contactabilidad_homologada
-            WHEN g.canal_origen = 'HUMANO' THEN h_call.contactabilidad
-          END,
-          g.management_original,
-          'NO_IDENTIFICADO'
-        ) AS grupo_respuesta,
+        gest.grupo_respuesta,
+        gest.nivel_1,
+        gest.nivel_2,
         
-        COALESCE(
-          CASE
-            WHEN g.canal_origen = 'BOT' THEN h_bot.n1_homologado
-            WHEN g.canal_origen = 'HUMANO' THEN h_call.n_1
-          END,
-          'SIN_N1'
-        ) AS nivel_1,
+        -- 💰 COMPROMISOS
+        gest.es_compromiso,
+        gest.monto_compromiso,
+        gest.fecha_compromiso,
         
-        COALESCE(
-          CASE
-            WHEN g.canal_origen = 'BOT' THEN h_bot.n2_homologado
-            WHEN g.canal_origen = 'HUMANO' THEN h_call.n_2
-          END,
-          'SIN_N2'
-        ) AS nivel_2,
+        -- 🔥 CONTEXTO DE CARTERA
+        COALESCE(asig.tipo_cartera, 'OTRAS') AS tipo_cartera,
+        asig.fecha_vencimiento AS fecha_vencimiento_cliente,
+        COALESCE(asig.categoria_vencimiento, 'SIN_VENCIMIENTO') AS categoria_vencimiento,
         
-        -- 💰 COMPROMISOS Y MONTOS
-        CASE
-          WHEN g.canal_origen = 'BOT' THEN COALESCE(h_bot.es_pdp_homologado, 0) = 1
-          WHEN g.canal_origen = 'HUMANO' THEN UPPER(COALESCE(h_call.pdp, '')) = 'SI'
-          ELSE FALSE
-        END AS es_compromiso,
-        
-        g.monto_compromiso,
-        g.fecha_compromiso,
-        
-        -- 🔥 NUEVO: CONTEXTO DE CARTERA Y ARCHIVO
-        COALESCE(asig.archivo, deuda.archivo, 'SIN_CARTERA') AS archivo_cartera,
-        COALESCE(asig.tipo_cartera, 
-                 CASE 
-                   WHEN CONTAINS_SUBSTR(UPPER(COALESCE(deuda.archivo, '')), 'TEMPRANA') THEN 'TEMPRANA'
-                   WHEN CONTAINS_SUBSTR(UPPER(COALESCE(deuda.archivo, '')), 'CF_ANN') THEN 'CUOTA_FRACCIONAMIENTO'
-                   WHEN CONTAINS_SUBSTR(UPPER(COALESCE(deuda.archivo, '')), 'AN') THEN 'ALTAS_NUEVAS'
-                   ELSE 'OTRAS'
-                 END,
-                 'SIN_TIPO') AS tipo_cartera,
-        
-        -- 🔥 NUEVO: INFORMACIÓN DE VENCIMIENTOS Y CÍCLICAS
-        COALESCE(asig.fecha_vencimiento, deuda.fecha_vencimiento, DATE('1900-01-01')) AS fecha_vencimiento_cliente,
-        COALESCE(asig.categoria_vencimiento, 
-                 CASE
-                   WHEN deuda.fecha_vencimiento IS NULL THEN 'SIN_VENCIMIENTO'
-                   WHEN deuda.fecha_vencimiento <= CURRENT_DATE() THEN 'VENCIDO'
-                   WHEN deuda.fecha_vencimiento <= DATE_ADD(CURRENT_DATE(), INTERVAL 30 DAY) THEN 'POR_VENCER_30D'
-                   WHEN deuda.fecha_vencimiento <= DATE_ADD(CURRENT_DATE(), INTERVAL 60 DAY) THEN 'POR_VENCER_60D'
-                   WHEN deuda.fecha_vencimiento <= DATE_ADD(CURRENT_DATE(), INTERVAL 90 DAY) THEN 'POR_VENCER_90D'
-                   ELSE 'VIGENTE_MAS_90D'
-                 END,
-                 'SIN_CATEGORIA') AS categoria_vencimiento,
-        
-        -- 🔥 NUEVO: CÍCLICA DERIVADA DEL VENCIMIENTO
-        CASE
-          WHEN COALESCE(asig.fecha_vencimiento, deuda.fecha_vencimiento) IS NOT NULL THEN
-            CONCAT('CICLICA_', FORMAT_DATE('%d', COALESCE(asig.fecha_vencimiento, deuda.fecha_vencimiento)))
+        -- Calcular cíclica desde día de vencimiento
+        CASE 
+          WHEN asig.fecha_vencimiento IS NOT NULL THEN
+            CONCAT('CICLICA_', FORMAT('%02d', EXTRACT(DAY FROM asig.fecha_vencimiento)))
           ELSE 'SIN_CICLICA'
         END AS ciclica_vencimiento,
         
-        -- 🔥 NUEVO: SEGMENTO Y ZONA DESDE CARTERA
         COALESCE(asig.segmento_gestion, 'SIN_SEGMENTO') AS segmento_gestion,
         COALESCE(asig.zona_geografica, 'SIN_ZONA') AS zona_geografica,
         
         -- 📊 FLAGS DE ANÁLISIS
-        CASE 
-          WHEN UPPER(g.management_original) LIKE '%CONTACTO_EFECTIVO%' 
-               OR UPPER(g.management_original) LIKE '%EFECTIVO%' 
-          THEN TRUE
-          ELSE FALSE 
-        END AS es_contacto_efectivo,
+        gest.es_contacto_efectivo,
         
-        ROW_NUMBER() OVER (
-          PARTITION BY g.cod_luna, g.fecha_gestion 
-          ORDER BY g.timestamp_gestion
-        ) = 1 AS es_primera_gestion_dia,
+        -- Primera gestión del día para el cliente (considerando ambos canales)
+        CASE WHEN gest.timestamp_gestion = MIN(gest.timestamp_gestion) OVER (
+          PARTITION BY gest.cod_luna, gest.fecha_gestion
+        ) THEN TRUE ELSE FALSE END AS es_primera_gestion_dia,
         
-        -- 🔗 REFERENCIAS A OTROS STAGES (mejoradas)
+        -- 🔗 REFERENCIAS A OTROS STAGES
         CASE WHEN asig.cod_luna IS NOT NULL THEN TRUE ELSE FALSE END AS tiene_asignacion,
-        CASE WHEN deuda.cod_cuenta IS NOT NULL THEN TRUE ELSE FALSE END AS tiene_deuda,
+        CASE WHEN deud.cod_cuenta IS NOT NULL THEN TRUE ELSE FALSE END AS tiene_deuda,
         
-        -- Una gestión es medible si el cliente tiene asignación O deuda
+        -- Medibilidad general
+        CASE WHEN asig.cod_luna IS NOT NULL OR deud.cod_cuenta IS NOT NULL 
+             THEN TRUE ELSE FALSE END AS es_gestion_medible,
+        
+        -- Tipo de medibilidad
         CASE 
-          WHEN asig.cod_luna IS NOT NULL OR deuda.cod_cuenta IS NOT NULL THEN TRUE 
-          ELSE FALSE 
-        END AS es_gestion_medible,
-        
-        -- 🔥 NUEVO: TIPO DE MEDIBILIDAD
-        CASE
-          WHEN asig.cod_luna IS NOT NULL AND deuda.cod_cuenta IS NOT NULL THEN 'ASIGNACION_Y_DEUDA'
+          WHEN asig.cod_luna IS NOT NULL AND deud.cod_cuenta IS NOT NULL THEN 'ASIGNACION_Y_DEUDA'
           WHEN asig.cod_luna IS NOT NULL THEN 'SOLO_ASIGNACION'
-          WHEN deuda.cod_cuenta IS NOT NULL THEN 'SOLO_DEUDA'
+          WHEN deud.cod_cuenta IS NOT NULL THEN 'SOLO_DEUDA'
           ELSE 'NO_MEDIBLE'
         END AS tipo_medibilidad,
         
-        -- 📅 DIMENSIONES TEMPORALES CALCULADAS
-        FORMAT_DATE('%A', g.fecha_gestion) AS dia_semana,
-        EXTRACT(WEEK FROM g.fecha_gestion) - EXTRACT(WEEK FROM DATE_TRUNC(g.fecha_gestion, MONTH)) + 1 AS semana_mes,
+        -- 🏆 PESO ORIGINAL
+        gest.weight_original,
+        
+        -- 🔥 MARCADORES DE MEJOR GESTIÓN POR CANAL (NUEVO ENFOQUE)
         CASE 
-          WHEN EXTRACT(DAYOFWEEK FROM g.fecha_gestion) IN (1, 7) THEN TRUE 
+          WHEN gest.canal_origen = 'BOT' 
+               AND gest.weight_original = MAX(CASE WHEN gest.canal_origen = 'BOT' THEN gest.weight_original END) OVER (
+                 PARTITION BY gest.cod_luna, gest.archivo_cartera, gest.fecha_gestion
+               )
+          THEN TRUE 
           ELSE FALSE 
-        END AS es_fin_semana,
+        END AS es_mejor_gestion_bot_dia,
+        
+        CASE 
+          WHEN gest.canal_origen = 'HUMANO' 
+               AND gest.weight_original = MAX(CASE WHEN gest.canal_origen = 'HUMANO' THEN gest.weight_original END) OVER (
+                 PARTITION BY gest.cod_luna, gest.archivo_cartera, gest.fecha_gestion
+               )
+          THEN TRUE 
+          ELSE FALSE 
+        END AS es_mejor_gestion_humano_dia,
+        
+        -- 📈 MÉTRICAS MENSUALES POR CANAL
+        COUNT(*) OVER (
+          PARTITION BY gest.cod_luna, gest.archivo_cartera, gest.canal_origen, 
+                       EXTRACT(YEAR FROM gest.fecha_gestion), EXTRACT(MONTH FROM gest.fecha_gestion)
+        ) AS gestiones_mes_canal,
+        
+        SUM(CASE WHEN gest.es_compromiso THEN 1 ELSE 0 END) OVER (
+          PARTITION BY gest.cod_luna, gest.archivo_cartera, gest.canal_origen,
+                       EXTRACT(YEAR FROM gest.fecha_gestion), EXTRACT(MONTH FROM gest.fecha_gestion)
+        ) AS compromisos_mes_canal,
+        
+        SUM(CASE WHEN gest.es_contacto_efectivo THEN 1 ELSE 0 END) OVER (
+          PARTITION BY gest.cod_luna, gest.archivo_cartera, gest.canal_origen,
+                       EXTRACT(YEAR FROM gest.fecha_gestion), EXTRACT(MONTH FROM gest.fecha_gestion)
+        ) AS contactos_efectivos_mes_canal,
+        
+        SUM(COALESCE(gest.monto_compromiso, 0)) OVER (
+          PARTITION BY gest.cod_luna, gest.archivo_cartera, gest.canal_origen,
+                       EXTRACT(YEAR FROM gest.fecha_gestion), EXTRACT(MONTH FROM gest.fecha_gestion)
+        ) AS monto_compromisos_mes_canal,
+        
+        COUNT(DISTINCT gest.fecha_gestion) OVER (
+          PARTITION BY gest.cod_luna, gest.archivo_cartera, gest.canal_origen,
+                       EXTRACT(YEAR FROM gest.fecha_gestion), EXTRACT(MONTH FROM gest.fecha_gestion)
+        ) AS dias_gestionado_canal_mes,
+        
+        -- 📅 DIMENSIONES TEMPORALES
+        FORMAT_DATE('%A', gest.fecha_gestion) AS dia_semana,
+        EXTRACT(WEEK FROM gest.fecha_gestion) - EXTRACT(WEEK FROM DATE_TRUNC(gest.fecha_gestion, MONTH)) + 1 AS semana_mes,
+        CASE WHEN EXTRACT(DAYOFWEEK FROM gest.fecha_gestion) IN (1, 7) THEN TRUE ELSE FALSE END AS es_fin_semana,
         
         -- 🕒 METADATOS
-        g.timestamp_gestion,
+        gest.timestamp_gestion,
         CURRENT_TIMESTAMP() AS fecha_actualizacion,
         p_fecha_proceso AS fecha_proceso,
         v_inicio_proceso AS fecha_carga
         
-      FROM gestiones_unificadas g
+      FROM gestiones_unificadas AS gest
       
-      -- 🔗 Homologación BOT
-      LEFT JOIN `mibot-222814.BI_USA.homologacion_P3fV4dWNeMkN5RJMhV8e_voicebot` AS h_bot 
-        ON g.canal_origen = 'BOT' 
-        AND COALESCE(g.management_original, '') = h_bot.bot_management 
-        AND COALESCE(g.sub_management_original, '') = h_bot.bot_sub_management 
-        AND COALESCE(g.compromiso_original, '') = h_bot.bot_compromiso
-      
-      -- 🔗 Homologación HUMANO  
-      LEFT JOIN `mibot-222814.BI_USA.homologacion_P3fV4dWNeMkN5RJMhV8e_v2` AS h_call 
-        ON g.canal_origen = 'HUMANO' 
-        AND COALESCE(g.management_original, '') = h_call.management
-      
-      -- 🔗 Homologación USUARIOS
-      LEFT JOIN `mibot-222814.BI_USA.homologacion_P3fV4dWNeMkN5RJMhV8e_usuarios` AS h_user 
-        ON g.canal_origen = 'HUMANO' 
-        AND g.nombre_agente_original = h_user.usuario
-      
-      -- 🔥 MEJORADO: Join con ASIGNACIÓN para contexto completo
+      -- Join con asignación para contexto de cartera
       LEFT JOIN `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_asignacion` AS asig
-        ON g.cod_luna = asig.cod_luna
-        AND g.fecha_gestion = asig.fecha_asignacion
+        ON CAST(gest.cod_luna AS STRING) = asig.cod_luna
+        AND gest.fecha_gestion = asig.fecha_asignacion
       
-      -- 🔥 MEJORADO: Join con DEUDAS para contexto completo  
-      LEFT JOIN `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` AS deuda
-        ON CAST(g.cod_luna AS STRING) = deuda.cod_cuenta
-        AND g.fecha_gestion = deuda.fecha_deuda
-      
-      WHERE g.cod_luna IS NOT NULL
+      -- Join con deudas para verificar medibilidad
+      LEFT JOIN `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` AS deud
+        ON CAST(gest.cod_luna AS STRING) = deud.cod_cuenta
+        AND gest.fecha_gestion = deud.fecha_deuda
+    ),
+    
+    gestiones_con_metricas AS (
+      SELECT 
+        *,
+        
+        -- 📈 CALCULAR WEIGHT ACUMULADO MES (solo mejores gestiones por canal)
+        SUM(CASE 
+          WHEN (canal_origen = 'BOT' AND es_mejor_gestion_bot_dia) 
+               OR (canal_origen = 'HUMANO' AND es_mejor_gestion_humano_dia)
+          THEN weight_original 
+          ELSE 0 
+        END) OVER (
+          PARTITION BY cod_luna, archivo_cartera, canal_origen,
+                       EXTRACT(YEAR FROM fecha_gestion), EXTRACT(MONTH FROM fecha_gestion)
+          ORDER BY fecha_gestion
+          ROWS UNBOUNDED PRECEDING
+        ) AS weight_acumulado_mes_canal,
+        
+        -- 🎯 TASA DE EFECTIVIDAD POR CANAL
+        CASE 
+          WHEN gestiones_mes_canal > 0 
+          THEN ROUND((contactos_efectivos_mes_canal + compromisos_mes_canal) / gestiones_mes_canal * 100, 2)
+          ELSE NULL 
+        END AS tasa_efectividad_canal_mes
+        
+      FROM gestiones_enriquecidas
+    ),
+    
+    gestiones_con_ranking AS (
+      SELECT 
+        *,
+        
+        -- 🏆 RANKING POR CANAL Y MES
+        ROW_NUMBER() OVER (
+          PARTITION BY canal_origen, archivo_cartera,
+                       EXTRACT(YEAR FROM fecha_gestion), EXTRACT(MONTH FROM fecha_gestion)
+          ORDER BY weight_acumulado_mes_canal DESC, dias_gestionado_canal_mes DESC
+        ) AS ranking_cliente_canal_mes
+        
+      FROM gestiones_con_metricas
     )
     
-    SELECT * FROM gestiones_enriquecidas
+    SELECT * FROM gestiones_con_ranking
     
   ) AS source
   
   ON target.cod_luna = source.cod_luna
+     AND target.archivo_cartera = source.archivo_cartera
      AND target.fecha_gestion = source.fecha_gestion
      AND target.canal_origen = source.canal_origen
      AND target.secuencia_gestion = source.secuencia_gestion
   
   -- 🔄 ACTUALIZAR REGISTROS EXISTENTES
   WHEN MATCHED THEN UPDATE SET
-    target.archivo_cartera = source.archivo_cartera,
-    target.tipo_cartera = source.tipo_cartera,
-    target.categoria_vencimiento = source.categoria_vencimiento,
-    target.ciclica_vencimiento = source.ciclica_vencimiento,
-    target.segmento_gestion = source.segmento_gestion,
-    target.grupo_respuesta = source.grupo_respuesta,
-    target.nivel_1 = source.nivel_1,
-    target.nivel_2 = source.nivel_2,
-    target.es_compromiso = source.es_compromiso,
-    target.monto_compromiso = source.monto_compromiso,
-    target.es_gestion_medible = source.es_gestion_medible,
-    target.tipo_medibilidad = source.tipo_medibilidad,
+    target.weight_original = source.weight_original,
+    target.es_mejor_gestion_bot_dia = source.es_mejor_gestion_bot_dia,
+    target.es_mejor_gestion_humano_dia = source.es_mejor_gestion_humano_dia,
+    target.weight_acumulado_mes_canal = source.weight_acumulado_mes_canal,
+    target.gestiones_mes_canal = source.gestiones_mes_canal,
+    target.compromisos_mes_canal = source.compromisos_mes_canal,
+    target.contactos_efectivos_mes_canal = source.contactos_efectivos_mes_canal,
+    target.tasa_efectividad_canal_mes = source.tasa_efectividad_canal_mes,
+    target.ranking_cliente_canal_mes = source.ranking_cliente_canal_mes,
     target.fecha_actualizacion = source.fecha_actualizacion,
     target.fecha_proceso = source.fecha_proceso
   
   -- ➕ INSERTAR NUEVOS REGISTROS
   WHEN NOT MATCHED THEN INSERT (
-    cod_luna, fecha_gestion, canal_origen, secuencia_gestion,
-    nombre_agente_original, operador_final, management_original,
-    sub_management_original, compromiso_original, grupo_respuesta,
-    nivel_1, nivel_2, es_compromiso, monto_compromiso, fecha_compromiso,
-    archivo_cartera, tipo_cartera, fecha_vencimiento_cliente, categoria_vencimiento,
-    ciclica_vencimiento, segmento_gestion, zona_geografica,
-    es_contacto_efectivo, es_primera_gestion_dia, tiene_asignacion,
-    tiene_deuda, es_gestion_medible, tipo_medibilidad, dia_semana, semana_mes,
-    es_fin_semana, timestamp_gestion, fecha_actualizacion, fecha_proceso, fecha_carga
+    cod_luna, archivo_cartera, fecha_gestion, canal_origen, secuencia_gestion,
+    nombre_agente_original, operador_final, management_original, sub_management_original,
+    compromiso_original, grupo_respuesta, nivel_1, nivel_2, es_compromiso,
+    monto_compromiso, fecha_compromiso, tipo_cartera, fecha_vencimiento_cliente,
+    categoria_vencimiento, ciclica_vencimiento, segmento_gestion, zona_geografica,
+    es_contacto_efectivo, es_primera_gestion_dia, tiene_asignacion, tiene_deuda,
+    es_gestion_medible, tipo_medibilidad, weight_original, es_mejor_gestion_bot_dia,
+    es_mejor_gestion_humano_dia, gestiones_mes_canal, weight_acumulado_mes_canal,
+    compromisos_mes_canal, contactos_efectivos_mes_canal, monto_compromisos_mes_canal,
+    tasa_efectividad_canal_mes, ranking_cliente_canal_mes, dias_gestionado_canal_mes,
+    dia_semana, semana_mes, es_fin_semana, timestamp_gestion, fecha_actualizacion,
+    fecha_proceso, fecha_carga
   )
   VALUES (
-    source.cod_luna, source.fecha_gestion, source.canal_origen, source.secuencia_gestion,
-    source.nombre_agente_original, source.operador_final, source.management_original,
-    source.sub_management_original, source.compromiso_original, source.grupo_respuesta,
-    source.nivel_1, source.nivel_2, source.es_compromiso, source.monto_compromiso,
-    source.fecha_compromiso, source.archivo_cartera, source.tipo_cartera, 
+    source.cod_luna, source.archivo_cartera, source.fecha_gestion, source.canal_origen,
+    source.secuencia_gestion, source.nombre_agente_original, source.operador_final,
+    source.management_original, source.sub_management_original, source.compromiso_original,
+    source.grupo_respuesta, source.nivel_1, source.nivel_2, source.es_compromiso,
+    source.monto_compromiso, source.fecha_compromiso, source.tipo_cartera,
     source.fecha_vencimiento_cliente, source.categoria_vencimiento, source.ciclica_vencimiento,
-    source.segmento_gestion, source.zona_geografica, source.es_contacto_efectivo, 
-    source.es_primera_gestion_dia, source.tiene_asignacion, source.tiene_deuda, 
-    source.es_gestion_medible, source.tipo_medibilidad, source.dia_semana, source.semana_mes,
-    source.es_fin_semana, source.timestamp_gestion, source.fecha_actualizacion, 
+    source.segmento_gestion, source.zona_geografica, source.es_contacto_efectivo,
+    source.es_primera_gestion_dia, source.tiene_asignacion, source.tiene_deuda,
+    source.es_gestion_medible, source.tipo_medibilidad, source.weight_original,
+    source.es_mejor_gestion_bot_dia, source.es_mejor_gestion_humano_dia,
+    source.gestiones_mes_canal, source.weight_acumulado_mes_canal, source.compromisos_mes_canal,
+    source.contactos_efectivos_mes_canal, source.monto_compromisos_mes_canal,
+    source.tasa_efectividad_canal_mes, source.ranking_cliente_canal_mes,
+    source.dias_gestionado_canal_mes, source.dia_semana, source.semana_mes,
+    source.es_fin_semana, source.timestamp_gestion, source.fecha_actualizacion,
     source.fecha_proceso, source.fecha_carga
   );
   
@@ -384,31 +467,29 @@ BEGIN
     v_registros_nuevos,
     v_registros_actualizados,
     'COMPLETADO',
-    CONCAT('Proceso completado. Canales: ', v_canales_detectados)
+    CONCAT('Proceso completado. Canales: ', v_canales_detectados, 
+           '. Enfoque: mejor gestión por canal separado')
   );
   
   -- ================================================================
-  -- RESUMEN DE NEGOCIO CON CONTEXTO DE CARTERA
+  -- RESUMEN DE NEGOCIO POR CANAL
   -- ================================================================
   
-  -- Mostrar métricas de gestiones por canal y cartera
+  -- Mostrar métricas de gestiones por canal
   SELECT 
-    'RESUMEN_GESTIONES_CARTERA' as tipo,
+    'RESUMEN_GESTIONES_POR_CANAL' as tipo,
     p_fecha_proceso as fecha_proceso,
     canal_origen,
-    archivo_cartera,
-    tipo_cartera,
-    ciclica_vencimiento,
     COUNT(*) as total_gestiones,
     COUNT(DISTINCT cod_luna) as clientes_unicos,
-    COUNT(CASE WHEN es_contacto_efectivo THEN 1 END) as contactos_efectivos,
-    COUNT(CASE WHEN es_compromiso THEN 1 END) as compromisos,
-    ROUND(SUM(monto_compromiso), 2) as monto_compromisos,
-    COUNT(CASE WHEN es_gestion_medible THEN 1 END) as gestiones_medibles,
-    COUNT(CASE WHEN es_primera_gestion_dia THEN 1 END) as primeras_gestiones_dia
+    SUM(CASE WHEN es_mejor_gestion_bot_dia OR es_mejor_gestion_humano_dia THEN 1 ELSE 0 END) as mejores_gestiones,
+    AVG(weight_original) as weight_promedio,
+    COUNT(CASE WHEN es_compromiso THEN 1 END) as total_compromisos,
+    COUNT(CASE WHEN es_contacto_efectivo THEN 1 END) as total_contactos_efectivos,
+    ROUND(SUM(COALESCE(monto_compromiso, 0)), 2) as monto_total_compromisos
   FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones`
   WHERE fecha_proceso = p_fecha_proceso
-  GROUP BY canal_origen, archivo_cartera, tipo_cartera, ciclica_vencimiento
-  ORDER BY canal_origen, archivo_cartera;
+  GROUP BY canal_origen
+  ORDER BY canal_origen;
   
 END;
