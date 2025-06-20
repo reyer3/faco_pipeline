@@ -3,7 +3,7 @@
 -- ================================================================
 -- Autor: FACO Team
 -- Fecha: 2025-06-20
--- Versión: 1.1.0 - CORREGIDA para BigQuery
+-- Versión: 1.2.0 - CORREGIDA clustering
 -- Descripción: Tabla staging para pagos con atribución de gestiones
 --              y análisis de efectividad
 -- ================================================================
@@ -88,8 +88,8 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_pagos` (
 )
 
 -- 🔍 CONFIGURACIÓN DE PARTICIONADO Y CLUSTERING
-PARTITION BY fecha_pago
-CLUSTER BY cartera, tipo_pago, categoria_efectividad
+PARTITION BY DATE(fecha_pago)
+CLUSTER BY cod_luna, cartera, es_pago_con_pdp
 
 -- 📋 OPCIONES DE TABLA
 OPTIONS(
