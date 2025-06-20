@@ -3,9 +3,9 @@
 -- ================================================================
 -- Autor: FACO Team
 -- Fecha: 2025-06-19
--- Versión: 1.0.0
+-- Versión: 1.1.0
 -- Descripción: Procesamiento de gestiones unificadas BOT + HUMANO
---              con homologación de respuestas y operadores
+--              con contexto de cartera y información de cíclicas
 -- ================================================================
 
 CREATE OR REPLACE PROCEDURE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_gestiones`(
@@ -75,7 +75,7 @@ BEGIN
   );
   
   -- ================================================================
-  -- MERGE/UPSERT: Gestiones unificadas con homologación
+  -- MERGE/UPSERT: Gestiones unificadas con contexto de cartera
   -- ================================================================
   
   MERGE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones` AS target
@@ -186,6 +186,41 @@ BEGIN
         g.monto_compromiso,
         g.fecha_compromiso,
         
+        -- 🔥 NUEVO: CONTEXTO DE CARTERA Y ARCHIVO
+        COALESCE(asig.archivo, deuda.archivo, 'SIN_CARTERA') AS archivo_cartera,
+        COALESCE(asig.tipo_cartera, 
+                 CASE 
+                   WHEN CONTAINS_SUBSTR(UPPER(COALESCE(deuda.archivo, '')), 'TEMPRANA') THEN 'TEMPRANA'
+                   WHEN CONTAINS_SUBSTR(UPPER(COALESCE(deuda.archivo, '')), 'CF_ANN') THEN 'CUOTA_FRACCIONAMIENTO'
+                   WHEN CONTAINS_SUBSTR(UPPER(COALESCE(deuda.archivo, '')), 'AN') THEN 'ALTAS_NUEVAS'
+                   ELSE 'OTRAS'
+                 END,
+                 'SIN_TIPO') AS tipo_cartera,
+        
+        -- 🔥 NUEVO: INFORMACIÓN DE VENCIMIENTOS Y CÍCLICAS
+        COALESCE(asig.fecha_vencimiento, deuda.fecha_vencimiento, DATE('1900-01-01')) AS fecha_vencimiento_cliente,
+        COALESCE(asig.categoria_vencimiento, 
+                 CASE
+                   WHEN deuda.fecha_vencimiento IS NULL THEN 'SIN_VENCIMIENTO'
+                   WHEN deuda.fecha_vencimiento <= CURRENT_DATE() THEN 'VENCIDO'
+                   WHEN deuda.fecha_vencimiento <= DATE_ADD(CURRENT_DATE(), INTERVAL 30 DAY) THEN 'POR_VENCER_30D'
+                   WHEN deuda.fecha_vencimiento <= DATE_ADD(CURRENT_DATE(), INTERVAL 60 DAY) THEN 'POR_VENCER_60D'
+                   WHEN deuda.fecha_vencimiento <= DATE_ADD(CURRENT_DATE(), INTERVAL 90 DAY) THEN 'POR_VENCER_90D'
+                   ELSE 'VIGENTE_MAS_90D'
+                 END,
+                 'SIN_CATEGORIA') AS categoria_vencimiento,
+        
+        -- 🔥 NUEVO: CÍCLICA DERIVADA DEL VENCIMIENTO
+        CASE
+          WHEN COALESCE(asig.fecha_vencimiento, deuda.fecha_vencimiento) IS NOT NULL THEN
+            CONCAT('CICLICA_', FORMAT_DATE('%d', COALESCE(asig.fecha_vencimiento, deuda.fecha_vencimiento)))
+          ELSE 'SIN_CICLICA'
+        END AS ciclica_vencimiento,
+        
+        -- 🔥 NUEVO: SEGMENTO Y ZONA DESDE CARTERA
+        COALESCE(asig.segmento_gestion, 'SIN_SEGMENTO') AS segmento_gestion,
+        COALESCE(asig.zona_geografica, 'SIN_ZONA') AS zona_geografica,
+        
         -- 📊 FLAGS DE ANÁLISIS
         CASE 
           WHEN UPPER(g.management_original) LIKE '%CONTACTO_EFECTIVO%' 
@@ -199,7 +234,7 @@ BEGIN
           ORDER BY g.timestamp_gestion
         ) = 1 AS es_primera_gestion_dia,
         
-        -- 🔗 REFERENCIAS A OTROS STAGES (calculadas después)
+        -- 🔗 REFERENCIAS A OTROS STAGES (mejoradas)
         CASE WHEN asig.cod_luna IS NOT NULL THEN TRUE ELSE FALSE END AS tiene_asignacion,
         CASE WHEN deuda.cod_cuenta IS NOT NULL THEN TRUE ELSE FALSE END AS tiene_deuda,
         
@@ -208,6 +243,14 @@ BEGIN
           WHEN asig.cod_luna IS NOT NULL OR deuda.cod_cuenta IS NOT NULL THEN TRUE 
           ELSE FALSE 
         END AS es_gestion_medible,
+        
+        -- 🔥 NUEVO: TIPO DE MEDIBILIDAD
+        CASE
+          WHEN asig.cod_luna IS NOT NULL AND deuda.cod_cuenta IS NOT NULL THEN 'ASIGNACION_Y_DEUDA'
+          WHEN asig.cod_luna IS NOT NULL THEN 'SOLO_ASIGNACION'
+          WHEN deuda.cod_cuenta IS NOT NULL THEN 'SOLO_DEUDA'
+          ELSE 'NO_MEDIBLE'
+        END AS tipo_medibilidad,
         
         -- 📅 DIMENSIONES TEMPORALES CALCULADAS
         FORMAT_DATE('%A', g.fecha_gestion) AS dia_semana,
@@ -218,6 +261,7 @@ BEGIN
         END AS es_fin_semana,
         
         -- 🕒 METADATOS
+        g.timestamp_gestion,
         CURRENT_TIMESTAMP() AS fecha_actualizacion,
         p_fecha_proceso AS fecha_proceso,
         v_inicio_proceso AS fecha_carga
@@ -241,17 +285,13 @@ BEGIN
         ON g.canal_origen = 'HUMANO' 
         AND g.nombre_agente_original = h_user.usuario
       
-      -- 🔗 Join con ASIGNACIÓN para medibilidad
+      -- 🔥 MEJORADO: Join con ASIGNACIÓN para contexto completo
       LEFT JOIN `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_asignacion` AS asig
         ON g.cod_luna = asig.cod_luna
         AND g.fecha_gestion = asig.fecha_asignacion
       
-      -- 🔗 Join con DEUDAS para medibilidad  
-      LEFT JOIN (
-        SELECT DISTINCT cod_cuenta, fecha_deuda
-        FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas`
-        WHERE fecha_proceso = p_fecha_proceso
-      ) AS deuda
+      -- 🔥 MEJORADO: Join con DEUDAS para contexto completo  
+      LEFT JOIN `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` AS deuda
         ON CAST(g.cod_luna AS STRING) = deuda.cod_cuenta
         AND g.fecha_gestion = deuda.fecha_deuda
       
@@ -269,12 +309,18 @@ BEGIN
   
   -- 🔄 ACTUALIZAR REGISTROS EXISTENTES
   WHEN MATCHED THEN UPDATE SET
+    target.archivo_cartera = source.archivo_cartera,
+    target.tipo_cartera = source.tipo_cartera,
+    target.categoria_vencimiento = source.categoria_vencimiento,
+    target.ciclica_vencimiento = source.ciclica_vencimiento,
+    target.segmento_gestion = source.segmento_gestion,
     target.grupo_respuesta = source.grupo_respuesta,
     target.nivel_1 = source.nivel_1,
     target.nivel_2 = source.nivel_2,
     target.es_compromiso = source.es_compromiso,
     target.monto_compromiso = source.monto_compromiso,
     target.es_gestion_medible = source.es_gestion_medible,
+    target.tipo_medibilidad = source.tipo_medibilidad,
     target.fecha_actualizacion = source.fecha_actualizacion,
     target.fecha_proceso = source.fecha_proceso
   
@@ -284,19 +330,24 @@ BEGIN
     nombre_agente_original, operador_final, management_original,
     sub_management_original, compromiso_original, grupo_respuesta,
     nivel_1, nivel_2, es_compromiso, monto_compromiso, fecha_compromiso,
+    archivo_cartera, tipo_cartera, fecha_vencimiento_cliente, categoria_vencimiento,
+    ciclica_vencimiento, segmento_gestion, zona_geografica,
     es_contacto_efectivo, es_primera_gestion_dia, tiene_asignacion,
-    tiene_deuda, es_gestion_medible, dia_semana, semana_mes,
-    es_fin_semana, fecha_actualizacion, fecha_proceso, fecha_carga
+    tiene_deuda, es_gestion_medible, tipo_medibilidad, dia_semana, semana_mes,
+    es_fin_semana, timestamp_gestion, fecha_actualizacion, fecha_proceso, fecha_carga
   )
   VALUES (
     source.cod_luna, source.fecha_gestion, source.canal_origen, source.secuencia_gestion,
     source.nombre_agente_original, source.operador_final, source.management_original,
     source.sub_management_original, source.compromiso_original, source.grupo_respuesta,
     source.nivel_1, source.nivel_2, source.es_compromiso, source.monto_compromiso,
-    source.fecha_compromiso, source.es_contacto_efectivo, source.es_primera_gestion_dia,
-    source.tiene_asignacion, source.tiene_deuda, source.es_gestion_medible,
-    source.dia_semana, source.semana_mes, source.es_fin_semana,
-    source.fecha_actualizacion, source.fecha_proceso, source.fecha_carga
+    source.fecha_compromiso, source.archivo_cartera, source.tipo_cartera, 
+    source.fecha_vencimiento_cliente, source.categoria_vencimiento, source.ciclica_vencimiento,
+    source.segmento_gestion, source.zona_geografica, source.es_contacto_efectivo, 
+    source.es_primera_gestion_dia, source.tiene_asignacion, source.tiene_deuda, 
+    source.es_gestion_medible, source.tipo_medibilidad, source.dia_semana, source.semana_mes,
+    source.es_fin_semana, source.timestamp_gestion, source.fecha_actualizacion, 
+    source.fecha_proceso, source.fecha_carga
   );
   
   -- ================================================================
@@ -337,14 +388,17 @@ BEGIN
   );
   
   -- ================================================================
-  -- RESUMEN DE NEGOCIO
+  -- RESUMEN DE NEGOCIO CON CONTEXTO DE CARTERA
   -- ================================================================
   
-  -- Mostrar métricas de gestiones por canal
+  -- Mostrar métricas de gestiones por canal y cartera
   SELECT 
-    'RESUMEN_GESTIONES' as tipo,
+    'RESUMEN_GESTIONES_CARTERA' as tipo,
     p_fecha_proceso as fecha_proceso,
     canal_origen,
+    archivo_cartera,
+    tipo_cartera,
+    ciclica_vencimiento,
     COUNT(*) as total_gestiones,
     COUNT(DISTINCT cod_luna) as clientes_unicos,
     COUNT(CASE WHEN es_contacto_efectivo THEN 1 END) as contactos_efectivos,
@@ -354,7 +408,7 @@ BEGIN
     COUNT(CASE WHEN es_primera_gestion_dia THEN 1 END) as primeras_gestiones_dia
   FROM `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones`
   WHERE fecha_proceso = p_fecha_proceso
-  GROUP BY canal_origen
-  ORDER BY canal_origen;
+  GROUP BY canal_origen, archivo_cartera, tipo_cartera, ciclica_vencimiento
+  ORDER BY canal_origen, archivo_cartera;
   
 END;
