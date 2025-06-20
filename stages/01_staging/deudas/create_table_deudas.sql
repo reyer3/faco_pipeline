@@ -2,8 +2,8 @@
 -- TABLA: Stage de Deudas - Pipeline de Cobranzas
 -- ================================================================
 -- Autor: FACO Team
--- Fecha: 2025-06-19
--- Versión: 1.1.0
+-- Fecha: 2025-06-20
+-- Versión: 1.2.0 - CORREGIDA para BigQuery
 -- Descripción: Tabla staging para datos de deudas diarias con lógica
 --              de medibilidad basada en coincidencia con FECHA_TRANDEUDA
 -- ================================================================
@@ -23,8 +23,8 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` (
   -- 💰 DATOS DE DEUDA
   monto_exigible FLOAT64
     OPTIONS(description="Monto exigible de la deuda"),
-  estado_deuda STRING NOT NULL DEFAULT 'ACTIVA'
-    OPTIONS(description="Estado actual de la deuda"),
+  estado_deuda STRING
+    OPTIONS(description="Estado actual de la deuda - DEFAULT: ACTIVA"),
   
   -- 📅 DIMENSIONES TEMPORALES
   fecha_deuda_construida DATE
@@ -39,20 +39,20 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` (
     OPTIONS(description="Días disponibles para gestión"),
   
   -- 🎯 LÓGICA DE NEGOCIO ESPECÍFICA
-  es_dia_apertura BOOLEAN NOT NULL
+  es_dia_apertura BOOLEAN
     OPTIONS(description="TRUE si es día de apertura de cartera"),
-  es_gestionable BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si el cliente es gestionable (tiene asignación)"),
-  es_medible BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si fecha_deuda coincide con FECHA_TRANDEUDA del calendario"),
-  tipo_activacion STRING NOT NULL
+  es_gestionable BOOLEAN
+    OPTIONS(description="TRUE si el cliente es gestionable (tiene asignación) - DEFAULT: FALSE"),
+  es_medible BOOLEAN
+    OPTIONS(description="TRUE si fecha_deuda coincide con FECHA_TRANDEUDA del calendario - DEFAULT: FALSE"),
+  tipo_activacion STRING
     OPTIONS(description="APERTURA, SUBSIGUIENTE, REACTIVACION"),
   
   -- 🔗 REFERENCIAS A ASIGNACIÓN
   cod_luna STRING
     OPTIONS(description="Código Luna del cliente (si está asignado)"),
-  tiene_asignacion BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si el cliente tiene asignación"),
+  tiene_asignacion BOOLEAN
+    OPTIONS(description="TRUE si el cliente tiene asignación - DEFAULT: FALSE"),
   segmento_gestion STRING
     OPTIONS(description="Segmento de gestión (desde asignación)"),
   tipo_cartera STRING
@@ -80,7 +80,7 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` (
 )
 
 -- 🔍 CONFIGURACIÓN DE PARTICIONADO Y CLUSTERING
-PARTITION BY DATE(fecha_deuda)
+PARTITION BY fecha_deuda
 CLUSTER BY cod_cuenta, es_medible, fecha_trandeuda
 
 -- 📋 OPCIONES DE TABLA
@@ -100,6 +100,17 @@ OPTIONS(
 -- CHECK: monto_exigible >= 0
 -- CHECK: tipo_activacion IN ('APERTURA', 'SUBSIGUIENTE', 'REACTIVACION')
 -- CHECK: estado_deuda IN ('ACTIVA', 'INACTIVA', 'CERRADA')
+
+-- ================================================================
+-- VALORES DEFAULT MANEJADOS EN STORED PROCEDURES
+-- ================================================================
+
+-- NOTA: Los valores DEFAULT se manejan en los stored procedures:
+-- - estado_deuda: 'ACTIVA' si es NULL
+-- - es_gestionable: FALSE si es NULL  
+-- - es_medible: FALSE si es NULL
+-- - tiene_asignacion: FALSE si es NULL
+-- - es_dia_apertura: Se calcula en base a lógica de negocio
 
 -- ================================================================
 -- COMENTARIOS DE NEGOCIO CORREGIDOS
