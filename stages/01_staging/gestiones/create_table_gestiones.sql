@@ -2,8 +2,8 @@
 -- TABLA: Stage de Gestiones - Pipeline de Cobranzas
 -- ================================================================
 -- Autor: FACO Team
--- Fecha: 2025-06-19
--- Versión: 1.3.0
+-- Fecha: 2025-06-20
+-- Versión: 1.4.0 - CORREGIDA para BigQuery
 -- Descripción: Tabla staging para gestiones unificadas BOT + HUMANO
 --              con marcadores de mejor gestión por canal separado
 -- ================================================================
@@ -45,8 +45,8 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones` (
     OPTIONS(description="Nivel 2 de respuesta homologado"),
   
   -- 💰 COMPROMISOS Y MONTOS
-  es_compromiso BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si la gestión generó compromiso"),
+  es_compromiso BOOLEAN
+    OPTIONS(description="TRUE si la gestión generó compromiso - DEFAULT: FALSE"),
   monto_compromiso FLOAT64
     OPTIONS(description="Monto del compromiso de pago"),
   fecha_compromiso DATE
@@ -71,56 +71,56 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones` (
     OPTIONS(description="Zona geográfica desde asignación"),
   
   -- 📊 FLAGS DE ANÁLISIS
-  es_contacto_efectivo BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si fue contacto efectivo"),
-  es_primera_gestion_dia BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si es la primera gestión del día para el cliente"),
+  es_contacto_efectivo BOOLEAN
+    OPTIONS(description="TRUE si fue contacto efectivo - DEFAULT: FALSE"),
+  es_primera_gestion_dia BOOLEAN
+    OPTIONS(description="TRUE si es la primera gestión del día para el cliente - DEFAULT: FALSE"),
   
   -- 🔗 REFERENCIAS A OTROS STAGES
-  tiene_asignacion BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si el cliente tiene asignación"),
-  tiene_deuda BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si el cliente tiene deuda"),
-  es_gestion_medible BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si la gestión es medible (tiene asignación O deuda)"),
+  tiene_asignacion BOOLEAN
+    OPTIONS(description="TRUE si el cliente tiene asignación - DEFAULT: FALSE"),
+  tiene_deuda BOOLEAN
+    OPTIONS(description="TRUE si el cliente tiene deuda - DEFAULT: FALSE"),
+  es_gestion_medible BOOLEAN
+    OPTIONS(description="TRUE si la gestión es medible (tiene asignación O deuda) - DEFAULT: FALSE"),
   tipo_medibilidad STRING NOT NULL
     OPTIONS(description="Tipo de medibilidad: ASIGNACION_Y_DEUDA, SOLO_ASIGNACION, SOLO_DEUDA, NO_MEDIBLE"),
   
   -- 🏆 SISTEMA DE PESO POR CANAL (NUEVO ENFOQUE)
   weight_original INT64 NOT NULL
     OPTIONS(description="Weight original de la tabla fuente (BOT o HUMANO)"),
-  es_mejor_gestion_bot_dia BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si es la gestión BOT de mayor weight del día para cliente+cartera"),
-  es_mejor_gestion_humano_dia BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si es la gestión HUMANO de mayor weight del día para cliente+cartera"),
+  es_mejor_gestion_bot_dia BOOLEAN
+    OPTIONS(description="TRUE si es la gestión BOT de mayor weight del día para cliente+cartera - DEFAULT: FALSE"),
+  es_mejor_gestion_humano_dia BOOLEAN
+    OPTIONS(description="TRUE si es la gestión HUMANO de mayor weight del día para cliente+cartera - DEFAULT: FALSE"),
   
   -- 📈 MÉTRICAS MENSUALES POR CANAL
-  gestiones_mes_canal INT64 NOT NULL DEFAULT 0
-    OPTIONS(description="Total gestiones del canal en el mes para cliente+cartera"),
-  weight_acumulado_mes_canal FLOAT64 NOT NULL DEFAULT 0.0
-    OPTIONS(description="Suma de weights de mejores gestiones del canal en el mes"),
-  compromisos_mes_canal INT64 NOT NULL DEFAULT 0
-    OPTIONS(description="Total compromisos del canal en el mes para cliente+cartera"),
-  contactos_efectivos_mes_canal INT64 NOT NULL DEFAULT 0
-    OPTIONS(description="Total contactos efectivos del canal en el mes para cliente+cartera"),
-  monto_compromisos_mes_canal FLOAT64 NOT NULL DEFAULT 0.0
-    OPTIONS(description="Suma de montos comprometidos del canal en el mes"),
+  gestiones_mes_canal INT64
+    OPTIONS(description="Total gestiones del canal en el mes para cliente+cartera - DEFAULT: 0"),
+  weight_acumulado_mes_canal FLOAT64
+    OPTIONS(description="Suma de weights de mejores gestiones del canal en el mes - DEFAULT: 0.0"),
+  compromisos_mes_canal INT64
+    OPTIONS(description="Total compromisos del canal en el mes para cliente+cartera - DEFAULT: 0"),
+  contactos_efectivos_mes_canal INT64
+    OPTIONS(description="Total contactos efectivos del canal en el mes para cliente+cartera - DEFAULT: 0"),
+  monto_compromisos_mes_canal FLOAT64
+    OPTIONS(description="Suma de montos comprometidos del canal en el mes - DEFAULT: 0.0"),
   
   -- 🎯 INDICADORES DE CALIDAD POR CANAL
-  tasa_efectividad_canal_mes FLOAT64 DEFAULT NULL
+  tasa_efectividad_canal_mes FLOAT64
     OPTIONS(description="% efectividad del canal en el mes para el cliente"),
-  ranking_cliente_canal_mes INT64 DEFAULT NULL
+  ranking_cliente_canal_mes INT64
     OPTIONS(description="Ranking del cliente en el canal por weight acumulado"),
-  dias_gestionado_canal_mes INT64 NOT NULL DEFAULT 0
-    OPTIONS(description="Días que el canal gestionó al cliente en el mes"),
+  dias_gestionado_canal_mes INT64
+    OPTIONS(description="Días que el canal gestionó al cliente en el mes - DEFAULT: 0"),
   
   -- 📅 DIMENSIONES TEMPORALES CALCULADAS
   dia_semana STRING
     OPTIONS(description="Día de la semana de la gestión"),
   semana_mes INT64
     OPTIONS(description="Semana del mes"),
-  es_fin_semana BOOLEAN NOT NULL DEFAULT FALSE
-    OPTIONS(description="TRUE si la gestión fue en fin de semana"),
+  es_fin_semana BOOLEAN
+    OPTIONS(description="TRUE si la gestión fue en fin de semana - DEFAULT: FALSE"),
   
   -- 🕒 METADATOS
   timestamp_gestion TIMESTAMP
@@ -134,7 +134,7 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_gestiones` (
 )
 
 -- 🔍 CONFIGURACIÓN DE PARTICIONADO Y CLUSTERING
-PARTITION BY DATE(fecha_gestion)
+PARTITION BY fecha_gestion
 CLUSTER BY cod_luna, archivo_cartera, canal_origen, weight_original
 
 -- 📋 OPCIONES DE TABLA
@@ -155,6 +155,27 @@ OPTIONS(
 -- CHECK: es_mejor_gestion_humano_dia = TRUE solo si canal_origen = 'HUMANO'
 -- INDEX: (cod_luna, archivo_cartera, fecha_gestion, canal_origen) para cálculos de mejor gestión
 -- INDEX: (cod_luna, archivo_cartera, canal_origen, EXTRACT(YEAR_MONTH FROM fecha_gestion)) para métricas mensuales
+
+-- ================================================================
+-- VALORES DEFAULT MANEJADOS EN STORED PROCEDURES
+-- ================================================================
+
+-- NOTA: Los valores DEFAULT se manejan en los stored procedures:
+-- - es_compromiso: FALSE si es NULL
+-- - es_contacto_efectivo: FALSE si es NULL  
+-- - es_primera_gestion_dia: FALSE si es NULL
+-- - tiene_asignacion: FALSE si es NULL
+-- - tiene_deuda: FALSE si es NULL
+-- - es_gestion_medible: FALSE si es NULL
+-- - es_mejor_gestion_bot_dia: FALSE si es NULL
+-- - es_mejor_gestion_humano_dia: FALSE si es NULL
+-- - gestiones_mes_canal: 0 si es NULL
+-- - weight_acumulado_mes_canal: 0.0 si es NULL
+-- - compromisos_mes_canal: 0 si es NULL
+-- - contactos_efectivos_mes_canal: 0 si es NULL
+-- - monto_compromisos_mes_canal: 0.0 si es NULL
+-- - dias_gestionado_canal_mes: 0 si es NULL
+-- - es_fin_semana: FALSE si es NULL
 
 -- ================================================================
 -- LÓGICA DE NEGOCIO - SISTEMA DE PESO POR CANAL
