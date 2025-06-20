@@ -2,16 +2,16 @@
 -- STORED PROCEDURE: Stage de Asignación - Pipeline de Cobranzas
 -- ================================================================
 -- Autor: FACO Team
--- Fecha: 2025-06-19
--- Versión: 1.1.0
+-- Fecha: 2025-06-20
+-- Versión: 1.2.0 - CORREGIDA para BigQuery
 -- Descripción: Procesamiento y transformación de datos de asignación
 --              con detección automática de archivos por fecha
 -- ================================================================
 
 CREATE OR REPLACE PROCEDURE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_sp_asignacion`(
-  IN p_fecha_proceso DATE DEFAULT CURRENT_DATE(),
-  IN p_archivo_filter STRING DEFAULT NULL,  -- OPCIONAL: Si es NULL, detecta automáticamente
-  IN p_modo_ejecucion STRING DEFAULT 'INCREMENTAL' -- 'FULL' o 'INCREMENTAL'
+  IN p_fecha_proceso DATE,  -- Obligatorio, se pasa desde script
+  IN p_archivo_filter STRING,  -- OPCIONAL: Si es NULL, detecta automáticamente
+  IN p_modo_ejecucion STRING -- 'FULL' o 'INCREMENTAL'
 )
 BEGIN
   
@@ -21,6 +21,15 @@ BEGIN
   DECLARE v_registros_nuevos INT64 DEFAULT 0;
   DECLARE v_registros_actualizados INT64 DEFAULT 0;
   DECLARE v_archivos_detectados STRING DEFAULT '';
+  
+  -- Manejar valores por defecto en variables
+  IF p_fecha_proceso IS NULL THEN
+    SET p_fecha_proceso = CURRENT_DATE();
+  END IF;
+  
+  IF p_modo_ejecucion IS NULL THEN
+    SET p_modo_ejecucion = 'INCREMENTAL';
+  END IF;
   
   -- ================================================================
   -- DETECCIÓN AUTOMÁTICA DE ARCHIVOS (si no se especifica filtro)
@@ -45,25 +54,29 @@ BEGIN
   -- LOGGING: Inicio del proceso
   -- ================================================================
   INSERT INTO `BI_USA.pipeline_logs` (
-    proceso, 
-    etapa, 
-    fecha_inicio, 
-    parametros, 
-    estado,
-    observaciones
+    timestamp,
+    stage_name,
+    fecha_proceso,
+    status,
+    records_processed,
+    duration_seconds,
+    message,
+    execution_parameters
   ) 
   VALUES (
-    'faco_pipeline', 
-    'stage_asignacion', 
     v_inicio_proceso,
+    'ASIGNACION',
+    p_fecha_proceso,
+    'INICIADO',
+    0,
+    0.0,
+    CONCAT('Archivos detectados: ', v_archivos_detectados),
     JSON_OBJECT(
       'fecha_proceso', CAST(p_fecha_proceso AS STRING),
       'archivo_filter', IFNULL(p_archivo_filter, 'AUTO_DETECT'),
       'modo_ejecucion', p_modo_ejecucion,
       'archivos_detectados', v_archivos_detectados
-    ),
-    'INICIADO',
-    CONCAT('Archivos detectados: ', v_archivos_detectados)
+    )
   );
   
   -- ================================================================
@@ -204,26 +217,28 @@ BEGIN
   
   -- Log final
   INSERT INTO `BI_USA.pipeline_logs` (
-    proceso, 
-    etapa, 
-    fecha_inicio,
-    fecha_fin,
-    registros_procesados,
-    registros_nuevos,
-    registros_actualizados,
-    estado,
-    observaciones
+    timestamp,
+    stage_name,
+    fecha_proceso,
+    status,
+    records_processed,
+    duration_seconds,
+    message,
+    execution_parameters
   ) 
   VALUES (
-    'faco_pipeline', 
-    'stage_asignacion', 
-    v_inicio_proceso,
     CURRENT_TIMESTAMP(),
-    v_registros_procesados,
-    v_registros_nuevos,
-    v_registros_actualizados,
+    'ASIGNACION',
+    p_fecha_proceso,
     'COMPLETADO',
-    CONCAT('Proceso completado. Modo: ', p_modo_ejecucion, '. Archivos: ', v_archivos_detectados)
+    v_registros_procesados,
+    TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), v_inicio_proceso, SECOND),
+    CONCAT('Proceso completado. Modo: ', p_modo_ejecucion, '. Archivos: ', v_archivos_detectados),
+    JSON_OBJECT(
+      'registros_nuevos', v_registros_nuevos,
+      'registros_actualizados', v_registros_actualizados,
+      'modo_ejecucion', p_modo_ejecucion
+    )
   );
   
   -- ================================================================
