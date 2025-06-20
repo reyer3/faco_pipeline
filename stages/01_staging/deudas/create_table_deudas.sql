@@ -3,7 +3,7 @@
 -- ================================================================
 -- Autor: FACO Team
 -- Fecha: 2025-06-20
--- Versión: 1.2.0 - CORREGIDA para BigQuery
+-- Versión: 1.3.0 - CORREGIDA particionado
 -- Descripción: Tabla staging para datos de deudas diarias con lógica
 --              de medibilidad basada en coincidencia con FECHA_TRANDEUDA
 -- ================================================================
@@ -80,7 +80,7 @@ CREATE OR REPLACE TABLE `BI_USA.bi_P3fV4dWNeMkN5RJMhV8e_stg_deudas` (
 )
 
 -- 🔍 CONFIGURACIÓN DE PARTICIONADO Y CLUSTERING
-PARTITION BY fecha_deuda
+PARTITION BY DATE(fecha_deuda)
 CLUSTER BY cod_cuenta, es_medible, fecha_trandeuda
 
 -- 📋 OPCIONES DE TABLA
